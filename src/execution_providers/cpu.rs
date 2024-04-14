@@ -7,11 +7,13 @@ pub struct CPUExecutionProvider {
 }
 
 impl CPUExecutionProvider {
+	#[must_use]
 	pub fn with_arena_allocator(mut self) -> Self {
 		self.use_arena = true;
 		self
 	}
 
+	#[must_use]
 	pub fn build(self) -> ExecutionProviderDispatch {
 		self.into()
 	}
@@ -33,11 +35,15 @@ impl ExecutionProvider for CPUExecutionProvider {
 		Ok(true)
 	}
 
+	fn supported_by_platform(&self) -> bool {
+		true
+	}
+
 	fn register(&self, session_builder: &SessionBuilder) -> Result<()> {
 		if self.use_arena {
-			status_to_result(ortsys![unsafe EnableCpuMemArena(session_builder.session_options_ptr)]).map_err(Error::ExecutionProvider)
+			status_to_result(ortsys![unsafe EnableCpuMemArena(session_builder.session_options_ptr.as_ptr())]).map_err(Error::ExecutionProvider)
 		} else {
-			status_to_result(ortsys![unsafe DisableCpuMemArena(session_builder.session_options_ptr)]).map_err(Error::ExecutionProvider)
+			status_to_result(ortsys![unsafe DisableCpuMemArena(session_builder.session_options_ptr.as_ptr())]).map_err(Error::ExecutionProvider)
 		}
 	}
 }

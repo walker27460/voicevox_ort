@@ -1,6 +1,8 @@
 [workspace]
 members = [
 	'ort-sys',
+	'examples/async-gpt2-api',
+	'examples/custom-ops',
 	'examples/gpt2',
 	'examples/model-info',
 	'examples/yolov8',
@@ -8,6 +10,8 @@ members = [
 ]
 default-members = [
 	'.',
+	'examples/async-gpt2-api',
+	'examples/custom-ops',
 	'examples/gpt2',
 	'examples/model-info',
 	'examples/yolov8',
@@ -16,8 +20,8 @@ default-members = [
 
 [package]
 name = "ort"
-description = "A safe Rust wrapper for ONNX Runtime 1.16 - Optimize and Accelerate Machine Learning Inferencing"
-version = "2.0.0-alpha.4"
+description = "A safe Rust wrapper for ONNX Runtime 1.17 - Optimize and Accelerate Machine Learning Inferencing"
+version = "2.0.0-rc.1"
 edition = "2021"
 rust-version = "1.70"
 license = "MIT OR Apache-2.0"
@@ -30,7 +34,7 @@ authors = [
 	"pyke.io <contact@pyke.io>",
 	"Nicolas Bigaouette <nbigaouette@gmail.com>"
 ]
-include = [ "src/", "examples/", "tests/", "LICENSE-APACHE", "LICENSE-MIT", "README.md" ]
+include = [ "src/", "benches/", "LICENSE-APACHE", "LICENSE-MIT", "README.md" ]
 
 [profile.release]
 opt-level = 3
@@ -39,14 +43,13 @@ strip = true
 codegen-units = 1
 
 [package.metadata.docs.rs]
-features = [ "ndarray", "half", "profiling", "custom-ops", "fetch-models", "copy-dylibs" ]
+features = [ "ndarray", "half", "operator-libraries", "fetch-models", "load-dynamic", "copy-dylibs" ]
 rustdoc-args = [ "--cfg", "docsrs" ]
 
 [features]
 default = [ "ndarray", "half", "download-binaries", "copy-dylibs" ]
 
-profiling = [ "widestring" ]
-custom-ops = [ "libc", "winapi" ]
+operator-libraries = [ "libc", "winapi" ]
 
 fetch-models = [ "ureq" ]
 download-binaries = [ "ort-sys/download-binaries" ]
@@ -74,7 +77,7 @@ qnn = [ "ort-sys/qnn" ]
 [dependencies]
 ndarray = { version = "0.15", optional = true }
 thiserror = "1.0"
-ort-sys = { version = "2.0.0-alpha.4", path = "ort-sys" }
+ort-sys = { version = "2.0.0-rc.1", path = "ort-sys" }
 libloading = { version = "0.8", optional = true }
 
 ureq = { version = "2.1", optional = true, default-features = false, features = [ "tls" ] }
@@ -86,11 +89,17 @@ libc = { version = "0.2", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", optional = true, features = [ "std", "libloaderapi" ] }
-widestring = { version = "1.0", optional = true }
 
 [dev-dependencies]
 anyhow = "1.0"
 ureq = "2.1"
-image = "0.24"
+image = "0.25"
 test-log = { version = "0.2", default-features = false, features = [ "trace" ] }
 tracing-subscriber = { version = "0.3", default-features = false, features = [ "env-filter", "fmt" ] }
+glassbench = "0.4"
+tokio = { version = "1.36", features = [ "test-util" ] }
+tokio-test = "0.4.3"
+
+[[bench]]
+name = "squeezenet"
+harness = false

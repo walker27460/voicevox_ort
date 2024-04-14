@@ -1,8 +1,8 @@
 use std::path::Path;
 
 use image::RgbImage;
-use ndarray::{Array, CowArray, Ix4};
-use ort::{inputs, GraphOptimizationLevel, Session, Tensor};
+use ndarray::{Array, ArrayViewD, CowArray, Ix4};
+use ort::{inputs, GraphOptimizationLevel, Session};
 use test_log::test;
 
 fn load_input_image<P: AsRef<Path>>(name: P) -> RgbImage {
@@ -51,7 +51,7 @@ fn upsample() -> ort::Result<()> {
 	let session = Session::builder()?
 		.with_optimization_level(GraphOptimizationLevel::Level1)?
 		.with_intra_threads(1)?
-		.with_model_from_memory(&session_data)
+		.commit_from_memory(&session_data)
 		.expect("Could not read model from memory");
 
 	let metadata = session.metadata()?;
@@ -69,10 +69,10 @@ fn upsample() -> ort::Result<()> {
 	let outputs = session.run(inputs![&array]?)?;
 
 	assert_eq!(outputs.len(), 1);
-	let output: Tensor<f32> = outputs[0].extract_tensor()?;
+	let output: ArrayViewD<f32> = outputs[0].try_extract_tensor()?;
 
 	// The image should have doubled in size
-	assert_eq!(output.view().shape(), [1, 448, 448, 3]);
+	assert_eq!(output.shape(), [1, 448, 448, 3]);
 
 	Ok(())
 }
@@ -92,7 +92,7 @@ fn upsample_with_ort_model() -> ort::Result<()> {
 	let session = Session::builder()?
 		.with_optimization_level(GraphOptimizationLevel::Level1)?
 		.with_intra_threads(1)?
-		.with_model_from_memory_directly(&session_data) // Zero-copy.
+		.commit_from_memory_directly(&session_data) // Zero-copy.
 		.expect("Could not read model from memory");
 
 	assert_eq!(session.inputs[0].input_type.tensor_dimensions().expect("input0 to be a tensor type"), &[-1, -1, -1, 3]);
@@ -106,10 +106,10 @@ fn upsample_with_ort_model() -> ort::Result<()> {
 	let outputs = session.run(inputs![&array]?)?;
 
 	assert_eq!(outputs.len(), 1);
-	let output: Tensor<f32> = outputs[0].extract_tensor()?;
+	let output: ArrayViewD<f32> = outputs[0].try_extract_tensor()?;
 
 	// The image should have doubled in size
-	assert_eq!(output.view().shape(), [1, 448, 448, 3]);
+	assert_eq!(output.shape(), [1, 448, 448, 3]);
 
 	Ok(())
 }

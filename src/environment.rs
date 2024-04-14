@@ -1,14 +1,22 @@
-use std::{cell::UnsafeCell, ffi::CString, sync::atomic::AtomicPtr, sync::Arc};
-
-use tracing::debug;
-
-use super::{
-	custom_logger,
-	error::{Error, Result},
-	ortsys, ExecutionProviderDispatch
+use std::{
+	cell::UnsafeCell,
+	ffi::{self, CStr, CString},
+	ptr,
+	sync::{
+		atomic::{AtomicPtr, Ordering},
+		Arc
+	}
 };
+
+use ort_sys::c_char;
+use tracing::{debug, Level};
+
 #[cfg(feature = "load-dynamic")]
 use crate::G_ORT_DYLIB_PATH;
+use crate::{
+	error::{Error, Result},
+	extern_system_fn, ortsys, ExecutionProviderDispatch
+};
 
 struct EnvironmentSingleton {
 	cell: UnsafeCell<Option<Arc<Environment>>>
@@ -19,24 +27,33 @@ unsafe impl Sync for EnvironmentSingleton {}
 static G_ENV: EnvironmentSingleton = EnvironmentSingleton { cell: UnsafeCell::new(None) };
 
 #[derive(Debug)]
-pub(crate) struct Environment {
+pub struct Environment {
 	pub(crate) execution_providers: Vec<ExecutionProviderDispatch>,
-	pub(crate) env_ptr: AtomicPtr<ort_sys::OrtEnv>
+	pub(crate) env_ptr: AtomicPtr<ort_sys::OrtEnv>,
+	pub(crate) has_global_threadpool: bool
+}
+
+impl Environment {
+	/// Loads the underlying [`ort_sys::OrtEnv`] pointer.
+	pub fn ptr(&self) -> *mut ort_sys::OrtEnv {
+		self.env_ptr.load(Ordering::Relaxed)
+	}
 }
 
 impl Drop for Environment {
 	#[tracing::instrument]
 	fn drop(&mut self) {
-		let env_ptr: *mut ort_sys::OrtEnv = *self.env_ptr.get_mut();
-
 		debug!("Releasing environment");
+
+		let env_ptr: *mut ort_sys::OrtEnv = *self.env_ptr.get_mut();
 
 		assert_ne!(env_ptr, std::ptr::null_mut());
 		ortsys![unsafe ReleaseEnv(env_ptr)];
 	}
 }
 
-pub(crate) fn get_environment() -> Result<&'static Arc<Environment>> {
+/// Gets a reference to the global environment, creating one if an environment has been committed yet.
+pub fn get_environment() -> Result<&'static Arc<Environment>> {
 	if let Some(c) = unsafe { &*G_ENV.cell.get() } {
 		Ok(c)
 	} else {
@@ -55,16 +72,7 @@ pub struct EnvironmentGlobalThreadPoolOptions {
 	pub intra_op_thread_affinity: Option<String>
 }
 
-/// Struct used to build an environment [`Environment`].
-///
-/// This is ONNX Runtime's main entry point. An environment _must_ be created as the first step. An [`Environment`] can
-/// only be built using `EnvironmentBuilder` to configure it.
-///
-/// Libraries using `ort` should **not** create an environment, as only one is allowed per process. Instead, allow the
-/// user to pass their own environment to the library.
-///
-/// **NOTE**: If the same configuration method (for example [`EnvironmentBuilder::with_name()`] is called multiple
-/// times, the last value will have precedence.
+/// Struct used to build an `Environment`.
 pub struct EnvironmentBuilder {
 	name: String,
 	execution_providers: Vec<ExecutionProviderDispatch>,
@@ -82,12 +90,9 @@ impl Default for EnvironmentBuilder {
 }
 
 impl EnvironmentBuilder {
-	/// Configure the environment with a given name
-	///
-	/// **NOTE**: Since ONNX can only define one environment per process, creating multiple environments using multiple
-	/// [`EnvironmentBuilder`]s will end up re-using the same environment internally; a new one will _not_ be created.
-	/// New parameters will be ignored.
-	pub fn with_name<S>(mut self, name: S) -> EnvironmentBuilder
+	/// Configure the environment with a given name for logging purposes.
+	#[must_use]
+	pub fn with_name<S>(mut self, name: S) -> Self
 	where
 		S: Into<String>
 	{
@@ -95,61 +100,35 @@ impl EnvironmentBuilder {
 		self
 	}
 
-	/// Configures a list of execution providers sessions created under this environment will use by default. Sessions
-	/// may override these via
-	/// [`SessionBuilder::with_execution_providers`](crate::SessionBuilder::with_execution_providers).
+	/// Sets a list of execution providers which all sessions created in this environment will register.
 	///
-	/// Execution providers are loaded in the order they are provided until a suitable execution provider is found. Most
-	/// execution providers will silently fail if they are unavailable or misconfigured (see notes below), however, some
-	/// may log to the console, which is sadly unavoidable. The CPU execution provider is always available, so always
-	/// put it last in the list (though it is not required).
+	/// If a session is created in this environment with [`crate::SessionBuilder::with_execution_providers`], those EPs
+	/// will take precedence over the environment's EPs.
 	///
-	/// Execution providers will only work if the corresponding `onnxep-*` feature is enabled and ONNX Runtime was built
+	/// Execution providers will only work if the corresponding Cargo feature is enabled and ONNX Runtime was built
 	/// with support for the corresponding execution provider. Execution providers that do not have their corresponding
-	/// feature enabled are currently ignored.
-	///
-	/// Execution provider options can be specified in the second argument. Refer to ONNX Runtime's
-	/// [execution provider docs](https://onnxruntime.ai/docs/execution-providers/) for configuration options. In most
-	/// cases, passing `None` to configure with no options is suitable.
-	///
-	/// It is recommended to enable the `cuda` EP for x86 platforms and the `acl` EP for ARM platforms for the best
-	/// performance, though this does mean you'll have to build ONNX Runtime for these targets. Microsoft's prebuilt
-	/// binaries are built with CUDA and TensorRT support, if you built `ort` with the `onnxep-cuda` or
-	/// `onnxep-tensorrt` features enabled.
-	///
-	/// Supported execution providers:
-	/// - `cpu`: Default CPU/MLAS execution provider. Available on all platforms.
-	/// - `acl`: Arm Compute Library
-	/// - `cuda`: NVIDIA CUDA/cuDNN
-	/// - `tensorrt`: NVIDIA TensorRT
-	///
-	/// ## Notes
-	///
-	/// - Using the CUDA/TensorRT execution providers **can terminate the process if the CUDA/TensorRT installation is
-	///   misconfigured**. Configuring the execution provider will seem to work, but when you attempt to run a session,
-	///   it will hard crash the process with a "stack buffer overrun" error. This can occur when CUDA/TensorRT is
-	///   missing a DLL such as `zlibwapi.dll`. To prevent your app from crashing, you can check to see if you can load
-	///   `zlibwapi.dll` before enabling the CUDA/TensorRT execution providers.
-	pub fn with_execution_providers(mut self, execution_providers: impl AsRef<[ExecutionProviderDispatch]>) -> EnvironmentBuilder {
+	/// feature enabled will emit a warning.
+	#[must_use]
+	pub fn with_execution_providers(mut self, execution_providers: impl AsRef<[ExecutionProviderDispatch]>) -> Self {
 		self.execution_providers = execution_providers.as_ref().to_vec();
 		self
 	}
 
 	/// Enables the global thread pool for this environment.
-	///
-	/// Sessions will only use the global thread pool if they are created with
-	/// [`SessionBuilder::with_disable_per_session_threads`](crate::SessionBuilder::with_disable_per_session_threads).
-	pub fn with_global_thread_pool(mut self, options: EnvironmentGlobalThreadPoolOptions) -> EnvironmentBuilder {
+	#[must_use]
+	pub fn with_global_thread_pool(mut self, options: EnvironmentGlobalThreadPoolOptions) -> Self {
 		self.global_thread_pool_options = Some(options);
 		self
 	}
 
-	/// Commit the configuration to a new [`Environment`].
+	/// Commit the environment configuration and set the global environment.
 	pub fn commit(self) -> Result<()> {
 		// drop global reference to previous environment
-		drop(unsafe { (*G_ENV.cell.get()).take() });
+		if let Some(env_arc) = unsafe { (*G_ENV.cell.get()).take() } {
+			drop(env_arc);
+		}
 
-		let env_ptr = if let Some(global_thread_pool) = self.global_thread_pool_options {
+		let (env_ptr, has_global_threadpool) = if let Some(global_thread_pool) = self.global_thread_pool_options {
 			let mut env_ptr: *mut ort_sys::OrtEnv = std::ptr::null_mut();
 			let logging_function: ort_sys::OrtLoggingFunction = Some(custom_logger);
 			let logger_param: *mut std::ffi::c_void = std::ptr::null_mut();
@@ -164,7 +143,7 @@ impl EnvironmentBuilder {
 				ortsys![unsafe SetGlobalIntraOpNumThreads(thread_options, intra_op_parallelism) -> Error::CreateEnvironment];
 			}
 			if let Some(spin_control) = global_thread_pool.spin_control {
-				ortsys![unsafe SetGlobalSpinControl(thread_options, if spin_control { 1 } else { 0 }) -> Error::CreateEnvironment];
+				ortsys![unsafe SetGlobalSpinControl(thread_options, i32::from(spin_control)) -> Error::CreateEnvironment];
 			}
 			if let Some(intra_op_thread_affinity) = global_thread_pool.intra_op_thread_affinity {
 				let cstr = CString::new(intra_op_thread_affinity).unwrap();
@@ -180,7 +159,7 @@ impl EnvironmentBuilder {
 					&mut env_ptr
 				) -> Error::CreateEnvironment; nonNull(env_ptr)];
 			ortsys![unsafe ReleaseThreadingOptions(thread_options)];
-			env_ptr
+			(env_ptr, true)
 		} else {
 			let mut env_ptr: *mut ort_sys::OrtEnv = std::ptr::null_mut();
 			let logging_function: ort_sys::OrtLoggingFunction = Some(custom_logger);
@@ -194,14 +173,15 @@ impl EnvironmentBuilder {
 					cname.as_ptr(),
 					&mut env_ptr
 				) -> Error::CreateEnvironment; nonNull(env_ptr)];
-			env_ptr
+			(env_ptr, false)
 		};
-		debug!(env_ptr = format!("{:?}", env_ptr).as_str(), "Environment created");
+		debug!(env_ptr = format!("{env_ptr:?}").as_str(), "Environment created");
 
 		unsafe {
 			*G_ENV.cell.get() = Some(Arc::new(Environment {
 				execution_providers: self.execution_providers,
-				env_ptr: AtomicPtr::new(env_ptr)
+				env_ptr: AtomicPtr::new(env_ptr),
+				has_global_threadpool
 			}));
 		};
 
@@ -211,29 +191,87 @@ impl EnvironmentBuilder {
 
 /// Creates an ONNX Runtime environment.
 ///
-/// If this is not called, a default environment will be created.
-///
-/// In order for environment settings to apply, this must be called **before** you use other APIs like
-/// [`crate::Session`], and you *must* call `.commit()` on the builder returned by this function.
+/// # Notes
+/// - It is not required to call this function. If this is not called by the time any other `ort` APIs are used, a
+///   default environment will be created.
+/// - Library crates that use `ort` shouldn't create their own environment. Let downstream applications create it.
+/// - In order for environment settings to apply, this must be called **before** you use other APIs like
+///   [`crate::Session`], and you *must* call `.commit()` on the builder returned by this function.
+#[must_use]
 pub fn init() -> EnvironmentBuilder {
 	EnvironmentBuilder::default()
 }
 
-/// Creates an ONNX Runtime environment, using the ONNX Runtime dynamic library specified by `path`.
+/// Creates an ONNX Runtime environment, dynamically loading ONNX Runtime from the library file (`.dll`/`.so`/`.dylib`)
+/// specified by `path`.
 ///
-/// If this is not called, a default environment will be created.
+/// This must be called before any other `ort` APIs are used in order for the correct dynamic library to be loaded.
 ///
-/// In order for environment settings to apply, this must be called **before** you use other APIs like
-/// [`crate::Session`], and you *must* call `.commit()` on the builder returned by this function.
+/// # Notes
+/// - In order for environment settings to apply, this must be called **before** you use other APIs like
+///   [`crate::Session`], and you *must* call `.commit()` on the builder returned by this function.
 #[cfg(feature = "load-dynamic")]
+#[cfg_attr(docsrs, doc(cfg(feature = "load-dynamic")))]
+#[must_use]
 pub fn init_from(path: impl ToString) -> EnvironmentBuilder {
 	let _ = G_ORT_DYLIB_PATH.set(Arc::new(path.to_string()));
 	EnvironmentBuilder::default()
 }
 
+/// ONNX's logger sends the code location where the log occurred, which will be parsed into this struct.
+#[derive(Debug)]
+struct CodeLocation<'a> {
+	file: &'a str,
+	line: &'a str,
+	function: &'a str
+}
+
+impl<'a> From<&'a str> for CodeLocation<'a> {
+	fn from(code_location: &'a str) -> Self {
+		let mut splitter = code_location.split(' ');
+		let file_and_line = splitter.next().unwrap_or("<unknown file>:<unknown line>");
+		let function = splitter.next().unwrap_or("<unknown function>");
+		let mut file_and_line_splitter = file_and_line.split(':');
+		let file = file_and_line_splitter.next().unwrap_or("<unknown file>");
+		let line = file_and_line_splitter.next().unwrap_or("<unknown line>");
+
+		CodeLocation { file, line, function }
+	}
+}
+
+extern_system_fn! {
+	/// Callback from C that will handle ONNX logging, forwarding ONNX's logs to the `tracing` crate.
+	pub(crate) fn custom_logger(_params: *mut ffi::c_void, severity: ort_sys::OrtLoggingLevel, category: *const c_char, _: *const c_char, code_location: *const c_char, message: *const c_char) {
+		assert_ne!(category, ptr::null());
+		let category = unsafe { CStr::from_ptr(category) };
+		assert_ne!(code_location, ptr::null());
+		let code_location_str = unsafe { CStr::from_ptr(code_location) }.to_str().unwrap();
+		assert_ne!(message, ptr::null());
+		let message = unsafe { CStr::from_ptr(message) }.to_str().unwrap();
+
+		let code_location = CodeLocation::from(code_location_str);
+		let span = tracing::span!(
+			Level::TRACE,
+			"ort",
+			category = category.to_str().unwrap_or("<unknown>"),
+			file = code_location.file,
+			line = code_location.line,
+			function = code_location.function
+		);
+
+		match severity {
+			ort_sys::OrtLoggingLevel::ORT_LOGGING_LEVEL_VERBOSE => tracing::event!(parent: &span, Level::TRACE, "{message}"),
+			ort_sys::OrtLoggingLevel::ORT_LOGGING_LEVEL_INFO => tracing::event!(parent: &span, Level::DEBUG, "{message}"),
+			ort_sys::OrtLoggingLevel::ORT_LOGGING_LEVEL_WARNING => tracing::event!(parent: &span, Level::INFO, "{message}"),
+			ort_sys::OrtLoggingLevel::ORT_LOGGING_LEVEL_ERROR => tracing::event!(parent: &span, Level::WARN, "{message}"),
+			ort_sys::OrtLoggingLevel::ORT_LOGGING_LEVEL_FATAL=> tracing::event!(parent: &span, Level::ERROR, "{message}")
+		}
+	}
+}
+
 #[cfg(test)]
 mod tests {
-	use std::sync::{atomic::Ordering, Arc, OnceLock, RwLock, RwLockWriteGuard};
+	use std::sync::{OnceLock, RwLock, RwLockWriteGuard};
 
 	use test_log::test;
 

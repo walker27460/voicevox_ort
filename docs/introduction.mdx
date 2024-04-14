@@ -9,7 +9,7 @@ title: Introduction
 `ort` makes it easy to deploy your machine learning models to production via [ONNX Runtime](https://onnxruntime.ai/), a hardware-accelerated inference engine. With `ort` + ONNX Runtime, you can run almost any ML model (including ResNet, YOLOv8, BERT, LLaMA) on almost any hardware, often far faster than PyTorch, and with the added bonus of Rust's efficiency.
 
 <Warning>
-    These docs are for the latest alpha version of `ort`, `2.0.0-alpha.4`. This alpha version is production-ready (just not API stable) and we recommend new & existing projects use it.
+    These docs are for the latest alpha version of `ort`, `2.0.0-rc.1`. This version is production-ready (just not API stable) and we recommend new & existing projects use it.
 </Warning>
 
 # Why `ort`?
@@ -19,7 +19,7 @@ For one, `ort` simply supports more features:
 
 | Feature comparison        | **📕 ort** | **📗 [ors](https://github.com/HaoboGu/ors)** | **🪟 [onnxruntime-rs](https://github.com/microsoft/onnxruntime/tree/main/rust)** |
 |---------------------------|-----------|-----------|----------------------|
-| Upstream version          | **v1.16.3** | v1.12.0 | v1.8               |
+| Upstream version          | **v1.17.1** | v1.12.0 | v1.8               |
 | `dlopen()`?               | ✅         | ✅         | ❌                    |
 | Execution providers?      | ✅         | ❌         | ❌                    |
 | I/O Binding?              | ✅         | ❌         | ❌                    |
@@ -38,7 +38,6 @@ Users of `ort` appreciate its ease of use and ergonomic API. `ort` is also battl
 - [**Numerical Elixir**](https://github.com/elixir-nx) uses `ort` to create ONNX Runtime bindings for the Elixir language.
 - [**`rust-bert`**](https://github.com/guillaume-be/rust-bert) implements many ready-to-use NLP pipelines in Rust à la Hugging Face Transformers with both [`tch`](https://crates.io/crates/tch) & `ort` backends.
 - [**`edge-transformers`**](https://github.com/npc-engine/edge-transformers) also implements Hugging Face Transformers pipelines in Rust using `ort`.
-- We use `ort` in nearly all of our ML projects, including [VITRI](https://vitri.pyke.io/) 😊
 
 # Getting started
 <Steps>
@@ -46,7 +45,7 @@ Users of `ort` appreciate its ease of use and ergonomic API. `ort` is also battl
         If you have a [supported platform](/setup/platforms) (and you probably do), installing `ort` couldn't be any simpler! Just add it to your Cargo dependencies:
         ```toml
         [dependencies]
-        ort = "2.0.0-alpha.4"
+        ort = "2.0.0-rc.1"
         ```
     </Step>
     <Step title="Convert your model">
@@ -66,7 +65,7 @@ Users of `ort` appreciate its ease of use and ergonomic API. `ort` is also battl
         let model = Session::builder()?
             .with_optimization_level(GraphOptimizationLevel::Level3)?
             .with_intra_threads(4)?
-            .with_model_from_file("yolov8m.onnx")?;
+            .commit_from_file("yolov8m.onnx")?;
         ```
     </Step>
     <Step title="Perform inference">
@@ -77,9 +76,7 @@ Users of `ort` appreciate its ease of use and ergonomic API. `ort` is also battl
 
         // Postprocessing
         let output = outputs["output0"]
-            .extract_tensor::<f32>()
-            .unwrap()
-            .view()
+            .extract_tensor::<f32>()?
             .t()
             .slice(s![.., .., 0])
             .into_owned();

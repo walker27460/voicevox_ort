@@ -7,7 +7,7 @@ use std::{
 
 use image::{imageops::FilterType, ImageBuffer, Pixel, Rgb};
 use ndarray::s;
-use ort::{inputs, ArrayExtensions, FetchModelError, GraphOptimizationLevel, Session, Tensor};
+use ort::{inputs, ArrayExtensions, FetchModelError, GraphOptimizationLevel, Session};
 use test_log::test;
 
 #[test]
@@ -19,7 +19,7 @@ fn squeezenet_mushroom() -> ort::Result<()> {
 	let session = Session::builder()?
 		.with_optimization_level(GraphOptimizationLevel::Level1)?
 		.with_intra_threads(1)?
-		.with_model_downloaded("https://parcel.pyke.io/v2/cdn/assetdelivery/ortrsv2/ex_models/squeezenet.onnx")
+		.commit_from_url("https://parcel.pyke.io/v2/cdn/assetdelivery/ortrsv2/ex_models/squeezenet.onnx")
 		.expect("Could not download model from file");
 
 	let metadata = session.metadata()?;
@@ -70,8 +70,13 @@ fn squeezenet_mushroom() -> ort::Result<()> {
 
 	// Downloaded model does not have a softmax as final layer; call softmax on second axis
 	// and iterate on resulting probabilities, creating an index to later access labels.
-	let output: Tensor<_> = outputs[0].extract_tensor()?;
-	let mut probabilities: Vec<(usize, f32)> = output.view().softmax(ndarray::Axis(1)).iter().copied().enumerate().collect::<Vec<_>>();
+	let mut probabilities: Vec<(usize, f32)> = outputs[0]
+		.try_extract_tensor()?
+		.softmax(ndarray::Axis(1))
+		.iter()
+		.copied()
+		.enumerate()
+		.collect::<Vec<_>>();
 	// Sort probabilities so highest is at beginning of vector.
 	probabilities.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
 

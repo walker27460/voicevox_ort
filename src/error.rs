@@ -1,6 +1,6 @@
 //! Types and helpers for handling ORT errors.
 
-use std::{convert::Infallible, io, path::PathBuf, string};
+use std::{convert::Infallible, ffi::CString, io, path::PathBuf, ptr, string};
 
 use thiserror::Error;
 
@@ -8,6 +8,22 @@ use super::{char_p_to_string, ortsys, tensor::TensorElementType, ValueType};
 
 /// Type alias for the Result type returned by ORT functions.
 pub type Result<T, E = Error> = std::result::Result<T, E>;
+
+pub(crate) trait IntoStatus {
+	fn into_status(self) -> *mut ort_sys::OrtStatus;
+}
+
+impl<T> IntoStatus for Result<T, Error> {
+	fn into_status(self) -> *mut ort_sys::OrtStatus {
+		let (code, message) = match &self {
+			Ok(_) => return ptr::null_mut(),
+			Err(e) => (ort_sys::OrtErrorCode::ORT_FAIL, Some(e.to_string()))
+		};
+		let message = message.map(|c| CString::new(c).unwrap());
+		// message will be copied, so this shouldn't leak
+		ortsys![unsafe CreateStatus(code, message.map(|c| c.as_ptr()).unwrap_or_else(std::ptr::null))]
+	}
+}
 
 /// An enum of all errors returned by ORT functions.
 #[non_exhaustive]
@@ -27,6 +43,9 @@ pub enum Error {
 	/// Error occurred when creating ONNX session options.
 	#[error("Failed to create ONNX Runtime session options: {0}")]
 	CreateSessionOptions(ErrorInternal),
+	/// Error occurred when creating an allocator from a [`crate::MemoryInfo`] struct while building a session.
+	#[error("Failed to create allocator from memory info: {0}")]
+	CreateAllocator(ErrorInternal),
 	/// Error occurred when creating an ONNX session.
 	#[error("Failed to create ONNX Runtime session: {0}")]
 	CreateSession(ErrorInternal),
@@ -84,11 +103,26 @@ pub enum Error {
 	/// Error occurred when creating ONNX tensor with specific data
 	#[error("Failed to create tensor with data: {0}")]
 	CreateTensorWithData(ErrorInternal),
+	/// Error occurred when attempting to create a [`crate::Sequence`].
+	#[error("Failed to create sequence value: {0}")]
+	CreateSequence(ErrorInternal),
+	/// Error occurred when attempting to create a [`crate::Map`].
+	#[error("Failed to create map value: {0}")]
+	CreateMap(ErrorInternal),
+	/// Invalid dimension when creating tensor from raw data
+	#[error("Invalid dimension at {0}; all dimensions must be >= 1 when creating a tensor from raw data")]
+	InvalidDimension(usize),
+	/// Shape does not match data length when creating tensor from raw data
+	#[error("Cannot create a tensor from raw data; shape {input:?} ({total}) is larger than the length of the data provided ({expected})")]
+	TensorShapeMismatch { input: Vec<i64>, total: usize, expected: usize },
+	/// Cannot create a tensor from non-contiguous array
+	#[error("Cannot create this type of tensor from an array that is not in contiguous standard layout")]
+	TensorDataNotContiguous,
 	/// Error occurred when filling a tensor with string data
 	#[error("Failed to fill string tensor: {0}")]
 	FillStringTensor(ErrorInternal),
-	/// Error occurred when checking if ONNX tensor was properly initialized
-	#[error("Failed to check if tensor is a tensor or was properly initialized: {0}")]
+	/// Error occurred when checking if a value is a tensor
+	#[error("Failed to check if value is a tensor: {0}")]
 	FailedTensorCheck(ErrorInternal),
 	/// Error occurred when getting tensor type and shape
 	#[error("Failed to get tensor type and shape: {0}")]
@@ -114,6 +148,9 @@ pub enum Error {
 	/// Error occurred when unterminating run options.
 	#[error("Failed to unterminate run options: {0}")]
 	RunOptionsUnsetTerminate(ErrorInternal),
+	/// Error occurred when setting run tag.
+	#[error("Failed to set run tag: {0}")]
+	RunOptionsSetTag(ErrorInternal),
 	/// Error occurred when converting data to a String
 	#[error("Data was not UTF-8: {0}")]
 	StringFromUtf8Error(#[from] string::FromUtf8Error),
@@ -147,10 +184,10 @@ pub enum Error {
 	WideFfiStringNull(#[from] widestring::error::ContainsNul<u16>),
 	#[error("`{0}` should be a null pointer")]
 	/// ORT pointer should have been null
-	PointerShouldBeNull(String),
+	PointerShouldBeNull(&'static str),
 	/// ORT pointer should not have been null
 	#[error("`{0}` should not be a null pointer")]
-	PointerShouldNotBeNull(String),
+	PointerShouldNotBeNull(&'static str),
 	/// The runtime type was undefined.
 	#[error("Undefined tensor element type")]
 	UndefinedTensorElementType,
@@ -199,10 +236,32 @@ pub enum Error {
 	InvalidMapKeyType { expected: TensorElementType, actual: TensorElementType },
 	#[error("Tried to extract a map with a value type of {expected:?}, but the map has value type {actual:?}")]
 	InvalidMapValueType { expected: TensorElementType, actual: TensorElementType },
+	#[error("Tried to extract a sequence with a different element type than its actual type {actual:?}")]
+	InvalidSequenceElementType { actual: ValueType },
 	#[error("Error occurred while attempting to extract data from sequence value: {0}")]
 	ExtractSequence(ErrorInternal),
 	#[error("Error occurred while attempting to extract data from map value: {0}")]
-	ExtractMap(ErrorInternal)
+	ExtractMap(ErrorInternal),
+	#[error("Failed to add custom operator to operator domain: {0}")]
+	AddCustomOperator(ErrorInternal),
+	#[error("Failed to create custom operator domain: {0}")]
+	CreateOperatorDomain(ErrorInternal),
+	#[error("Failed to add custom operator domain to session: {0}")]
+	AddCustomOperatorDomain(ErrorInternal),
+	#[error("Failed to create kernel context: {0}")]
+	CreateKernelContext(ErrorInternal),
+	#[error("Failed to get operator input: {0}")]
+	GetOperatorInput(ErrorInternal),
+	#[error("Failed to get operator output: {0}")]
+	GetOperatorOutput(ErrorInternal),
+	#[error("{0}")]
+	CustomError(#[from] Box<dyn std::error::Error + Send + Sync + 'static>),
+	#[error("String tensors cannot be borrowed as mutable")]
+	StringTensorNotMutable,
+	#[error("Could't get `MemoryInfo` from allocator: {0}")]
+	AllocatorGetInfo(ErrorInternal),
+	#[error("Could't get `MemoryType` from memory info: {0}")]
+	GetMemoryType(ErrorInternal)
 }
 
 impl From<Infallible> for Error {
@@ -251,6 +310,16 @@ pub enum ErrorInternal {
 	IntoStringError(std::ffi::IntoStringError)
 }
 
+impl ErrorInternal {
+	#[must_use]
+	pub fn as_str(&self) -> Option<&str> {
+		match self {
+			ErrorInternal::Msg(msg) => Some(msg.as_str()),
+			ErrorInternal::IntoStringError(_) => None
+		}
+	}
+}
+
 /// Error from downloading pre-trained model from the [ONNX Model Zoo](https://github.com/onnx/models).
 #[non_exhaustive]
 #[derive(Error, Debug)]
@@ -287,14 +356,12 @@ impl From<*mut ort_sys::OrtStatus> for OrtStatusWrapper {
 	}
 }
 
-pub(crate) fn assert_null_pointer<T>(ptr: *const T, name: &str) -> Result<()> {
-	ptr.is_null().then_some(()).ok_or_else(|| Error::PointerShouldBeNull(name.to_owned()))
+pub(crate) fn assert_null_pointer<T>(ptr: *const T, name: &'static str) -> Result<()> {
+	ptr.is_null().then_some(()).ok_or_else(|| Error::PointerShouldBeNull(name))
 }
 
-pub(crate) fn assert_non_null_pointer<T>(ptr: *const T, name: &str) -> Result<()> {
-	(!ptr.is_null())
-		.then_some(())
-		.ok_or_else(|| Error::PointerShouldNotBeNull(name.to_owned()))
+pub(crate) fn assert_non_null_pointer<T>(ptr: *const T, name: &'static str) -> Result<()> {
+	(!ptr.is_null()).then_some(()).ok_or_else(|| Error::PointerShouldNotBeNull(name))
 }
 
 impl From<OrtStatusWrapper> for Result<(), ErrorInternal> {

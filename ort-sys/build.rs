@@ -14,7 +14,10 @@ use self::dirs::cache_dir;
 
 #[cfg(feature = "download-binaries")]
 fn fetch_file(source_url: &str) -> Vec<u8> {
-	let resp = ureq::get(source_url)
+	let resp = ureq::AgentBuilder::new()
+		.try_proxy_from_env(true)
+		.build()
+		.get(source_url)
 		.timeout(std::time::Duration::from_secs(1800))
 		.call()
 		.unwrap_or_else(|err| panic!("Failed to GET `{source_url}`: {err}"));
@@ -67,6 +70,8 @@ fn copy_libraries(lib_dir: &Path, out_dir: &Path) {
 	for out_dir in [out_dir.to_path_buf(), out_dir.join("examples"), out_dir.join("deps")] {
 		#[cfg(windows)]
 		let mut copy_fallback = false;
+		#[cfg(not(windows))]
+		let copy_fallback = false;
 
 		let lib_files = std::fs::read_dir(lib_dir).unwrap_or_else(|_| panic!("Failed to read contents of `{}` (does it exist?)", lib_dir.display()));
 		for lib_file in lib_files.filter(|e| {
@@ -79,18 +84,35 @@ fn copy_libraries(lib_dir: &Path, out_dir: &Path) {
 			let lib_name = lib_path.file_name().unwrap();
 			let out_path = out_dir.join(lib_name);
 			if !out_path.exists() {
+				if out_path.is_symlink() {
+					fs::remove_file(&out_path).unwrap();
+				}
 				#[cfg(windows)]
 				if std::os::windows::fs::symlink_file(&lib_path, &out_path).is_err() {
 					copy_fallback = true;
-					std::fs::copy(&lib_path, out_path).unwrap();
+					std::fs::copy(&lib_path, &out_path).unwrap();
 				}
 				#[cfg(unix)]
-				std::os::unix::fs::symlink(&lib_path, out_path).unwrap();
+				std::os::unix::fs::symlink(&lib_path, &out_path).unwrap();
+			}
+			if !copy_fallback {
+				println!("cargo:rerun-if-changed={}", out_path.to_str().unwrap());
+			}
+		}
+
+		#[cfg(target_os = "linux")]
+		{
+			let main_dy = lib_dir.join("libonnxruntime.so");
+			let versioned_dy = out_dir.join("libonnxruntime.so.1.17.1");
+			if main_dy.exists() && !versioned_dy.exists() {
+				if versioned_dy.is_symlink() {
+					fs::remove_file(&versioned_dy).unwrap();
+				}
+				std::os::unix::fs::symlink(main_dy, versioned_dy).unwrap();
 			}
 		}
 
 		// If we had to fallback to copying files on Windows, break early to avoid copying to 3 different directories
-		#[cfg(windows)]
 		if copy_fallback {
 			break;
 		}
@@ -117,6 +139,7 @@ fn static_link_prerequisites(using_pyke_libs: bool) {
 		println!("cargo:rustc-link-lib=stdc++");
 	} else if target_os == "windows" && (using_pyke_libs || cfg!(feature = "directml")) {
 		println!("cargo:rustc-link-lib=dxguid");
+		println!("cargo:rustc-link-lib=DXCORE");
 		println!("cargo:rustc-link-lib=DXGI");
 		println!("cargo:rustc-link-lib=D3D12");
 		println!("cargo:rustc-link-lib=DirectML");
@@ -153,11 +176,12 @@ fn prepare_libort_dir() -> (PathBuf, bool) {
 			#[allow(clippy::type_complexity)]
 			let static_configs: Vec<(PathBuf, PathBuf, PathBuf, Box<dyn Fn(PathBuf, &String) -> PathBuf>)> = vec![
 				(lib_dir.join(&profile), lib_dir.join("lib"), lib_dir.join("_deps"), Box::new(|p: PathBuf, profile| p.join(profile))),
+				(lib_dir.join(&profile), lib_dir.join("lib"), lib_dir.join(&profile).join("_deps"), Box::new(|p: PathBuf, _| p)),
 				(lib_dir.clone(), lib_dir.join("lib"), lib_dir.parent().unwrap().join("_deps"), Box::new(|p: PathBuf, _| p)),
 				(lib_dir.join("onnxruntime"), lib_dir.join("onnxruntime").join("lib"), lib_dir.join("_deps"), Box::new(|p: PathBuf, _| p)),
 			];
 			for (lib_dir, extension_lib_dir, external_lib_dir, transform_dep) in static_configs {
-				if lib_dir.join(platform_format_lib("onnxruntime_common")).exists() {
+				if lib_dir.join(platform_format_lib("onnxruntime_common")).exists() && external_lib_dir.exists() {
 					add_search_dir(&lib_dir);
 
 					for lib in &["common", "flatbuffers", "framework", "graph", "mlas", "optimizer", "providers", "session", "util"] {
@@ -205,7 +229,12 @@ fn prepare_libort_dir() -> (PathBuf, bool) {
 
 					if target_arch != "wasm32" {
 						add_search_dir(transform_dep(external_lib_dir.join("pytorch_cpuinfo-build"), &profile));
-						add_search_dir(transform_dep(external_lib_dir.join("pytorch_cpuinfo-build").join("deps").join("clog"), &profile));
+						let clog_path = transform_dep(external_lib_dir.join("pytorch_cpuinfo-build").join("deps").join("clog"), &profile);
+						if clog_path.exists() {
+							add_search_dir(clog_path);
+						} else {
+							add_search_dir(transform_dep(external_lib_dir.join("pytorch_clog-build"), &profile));
+						}
 						println!("cargo:rustc-link-lib=static=cpuinfo");
 						println!("cargo:rustc-link-lib=static=clog");
 					}
@@ -222,6 +251,12 @@ fn prepare_libort_dir() -> (PathBuf, bool) {
 					println!("cargo:rustc-link-lib=static=absl_low_level_hash");
 					add_search_dir(transform_dep(external_lib_dir.join("abseil_cpp-build").join("absl").join("container"), &profile));
 					println!("cargo:rustc-link-lib=static=absl_raw_hash_set");
+
+					if cfg!(feature = "coreml") && (target_os == "macos" || target_os == "ios") {
+						println!("cargo:rustc-link-lib=framework=CoreML");
+						println!("cargo:rustc-link-lib=coreml_proto");
+						println!("cargo:rustc-link-lib=onnxruntime_providers_coreml");
+					}
 
 					// #[cfg(feature = "rocm")]
 					// println!("cargo:rustc-link-lib=onnxruntime_providers_rocm");
@@ -251,48 +286,48 @@ fn prepare_libort_dir() -> (PathBuf, bool) {
 			let target = env::var("TARGET").unwrap().to_string();
 			let (prebuilt_url, prebuilt_hash) = match target.as_str() {
 				"aarch64-apple-darwin" => (
-					"https://parcel.pyke.io/v2/delivery/ortrs/packages/msort-binary/1.16.3/ortrs-msort_static-v1.16.3-aarch64-apple-darwin.tgz",
-					"188E07B9304CCC28877195ECD2177EF3EA6603A0B5B3497681A6C9E584721387"
+					"https://parcel.pyke.io/v2/delivery/ortrs/packages/msort-binary/1.17.1/ortrs-msort_static-v1.17.1-aarch64-apple-darwin.tgz",
+					"041D1DD6005B29F4EAB74EF0E0B491FE9932004ADEE740FE9BA037D7BC52DBFC"
 				),
 				"aarch64-pc-windows-msvc" => (
-					"https://parcel.pyke.io/v2/delivery/ortrs/packages/msort-binary/1.16.3/ortrs-msort_static-v1.16.3-aarch64-pc-windows-msvc.tgz",
-					"B35F6526EAF61527531D6F73EBA19EF09D6B0886FB66C14E1B594EE70F447817"
+					"https://parcel.pyke.io/v2/delivery/ortrs/packages/msort-binary/1.17.1/ortrs-msort_static-v1.17.1-aarch64-pc-windows-msvc.tgz",
+					"5AA68F5DB1BA1A5084E00E3C60AB4FA6BDEECA05104DACA8B88D6DBCC178EBF5"
 				),
 				"aarch64-unknown-linux-gnu" => (
-					"https://parcel.pyke.io/v2/delivery/ortrs/packages/msort-binary/1.16.3/ortrs-msort_static-v1.16.3-aarch64-unknown-linux-gnu.tgz",
-					"C1E315515856D7880545058479020756BC5CE4C0BA07FB3DD2104233EC7C3C81"
+					"https://parcel.pyke.io/v2/delivery/ortrs/packages/msort-binary/1.17.1/ortrs-msort_static-v1.17.1-aarch64-unknown-linux-gnu.tgz",
+					"73A569FF807D655FD6258816FBC9660667370AEB4A47C6754746BCBF07C280F9"
 				),
 				"wasm32-unknown-emscripten" => (
-					"https://parcel.pyke.io/v2/delivery/ortrs/packages/msort-binary/1.16.3/ortrs-msort_static-v1.16.3-wasm32-unknown-emscripten.tgz",
-					"468F74FB4C7451DC94EBABC080779CDFF0C7DA0617D85ADF21D5435A96F9D470"
+					"https://parcel.pyke.io/v2/delivery/ortrs/packages/msort-binary/1.17.1/ortrs-msort_static-v1.17.1-wasm32-unknown-emscripten.tgz",
+					"58EAD204FE53A488489287FFD97113E89A2CCA91876D3186CDBCA10A4F5A3287"
 				),
 				"x86_64-apple-darwin" => (
-					"https://parcel.pyke.io/v2/delivery/ortrs/packages/msort-binary/1.16.3/ortrs-msort_static-v1.16.3-x86_64-apple-darwin.tgz",
-					"0191C95D9E797BF77C723AD82DC078C6400834B55B8465FA5176BA984FFEAB08"
+					"https://parcel.pyke.io/v2/delivery/ortrs/packages/msort-binary/1.17.1/ortrs-msort_static-v1.17.1-x86_64-apple-darwin.tgz",
+					"BB4320E2B4FB86D785B7CBB4D0CBDCCCD95253E70588410A4B2F27BCE9E917F8"
 				),
 				"x86_64-pc-windows-msvc" => {
 					if cfg!(any(feature = "cuda", feature = "tensorrt")) {
 						(
-							"https://parcel.pyke.io/v2/delivery/ortrs/packages/msort-binary/1.16.3/ortrs-msort_dylib_cuda-v1.16.3-x86_64-pc-windows-msvc.tgz",
-							"B0F08E93E580297C170F04933742D04813C9C3BAD3705E1100CA9EF464AE4011"
+							"https://parcel.pyke.io/v2/delivery/ortrs/packages/msort-binary/1.17.1/ortrs-msort_dylib_cuda-v1.17.1-x86_64-pc-windows-msvc.tgz",
+							"020A5E0F4DE81DDAAFB7A7928112E57A7153C3B43C7548EA1A3C570A6AFB6F00"
 						)
 					} else {
 						(
-							"https://parcel.pyke.io/v2/delivery/ortrs/packages/msort-binary/1.16.3/ortrs-msort_static-v1.16.3-x86_64-pc-windows-msvc.tgz",
-							"32ADC031C0EAA6C521680EEB9A8C39572C600A5B4F90AFE984590EA92B99E3BE"
+							"https://parcel.pyke.io/v2/delivery/ortrs/packages/msort-binary/1.17.1/ortrs-msort_static-v1.17.1-x86_64-pc-windows-msvc.tgz",
+							"1388EABC74F1FA0E0695896C0BBFADCCE3E16B6DA489392D790DCAC642DEF6AE"
 						)
 					}
 				}
 				"x86_64-unknown-linux-gnu" => {
 					if cfg!(any(feature = "cuda", feature = "tensorrt")) {
 						(
-							"https://parcel.pyke.io/v2/delivery/ortrs/packages/msort-binary/1.16.3/ortrs-msort_dylib_cuda-v1.16.3-x86_64-unknown-linux-gnu.tgz",
-							"0F0651D10BA56A6EA613F10B60E5C4D892384416C4D76E1F618BE57D1270993F"
+							"https://parcel.pyke.io/v2/delivery/ortrs/packages/msort-binary/1.17.1/ortrs-msort_dylib_cuda-v1.17.1-x86_64-unknown-linux-gnu.tgz",
+							"3000FAC7DB9AD3292AA9F0D887F85F2CDF8F522A9920B60D803648ED0E00FA13"
 						)
 					} else {
 						(
-							"https://parcel.pyke.io/v2/delivery/ortrs/packages/msort-binary/1.16.3/ortrs-msort_static-v1.16.3-x86_64-unknown-linux-gnu.tgz",
-							"D0E63AC1E5A56D0480009049183542E0BB1482CE29A1D110CC8550BEC5D994E2"
+							"https://parcel.pyke.io/v2/delivery/ortrs/packages/msort-binary/1.17.1/ortrs-msort_static-v1.17.1-x86_64-unknown-linux-gnu.tgz",
+							"14AFEC12219C8D587396F4EF3AB471CE5B64DFB5BB0CFD4C21C22B85BE5E519F"
 						)
 					}
 				}
@@ -311,7 +346,7 @@ fn prepare_libort_dir() -> (PathBuf, bool) {
 			let lib_dir = cache_dir.join(ORT_EXTRACT_DIR);
 			if !lib_dir.exists() {
 				let downloaded_file = fetch_file(prebuilt_url);
-				assert!(verify_file(&downloaded_file, prebuilt_hash));
+				assert!(verify_file(&downloaded_file, prebuilt_hash), "hash does not match!");
 				extract_tgz(&downloaded_file, &cache_dir);
 			}
 

@@ -3,8 +3,8 @@ use std::{
 	path::Path
 };
 
-use ndarray::{array, concatenate, s, Array1, Axis};
-use ort::{inputs, CUDAExecutionProvider, GraphOptimizationLevel, Session, Tensor};
+use ndarray::{array, concatenate, s, Array1, ArrayViewD, Axis};
+use ort::{inputs, CUDAExecutionProvider, GraphOptimizationLevel, Session};
 use rand::Rng;
 use tokenizers::Tokenizer;
 
@@ -36,7 +36,7 @@ fn main() -> ort::Result<()> {
 	let session = Session::builder()?
 		.with_optimization_level(GraphOptimizationLevel::Level1)?
 		.with_intra_threads(1)?
-		.with_model_downloaded("https://parcel.pyke.io/v2/cdn/assetdelivery/ortrsv2/ex_models/gpt2.onnx")?;
+		.commit_from_url("https://parcel.pyke.io/v2/cdn/assetdelivery/ortrsv2/ex_models/gpt2.onnx")?;
 
 	// Load the tokenizer and encode the prompt into a sequence of tokens.
 	let tokenizer = Tokenizer::from_file(Path::new(env!("CARGO_MANIFEST_DIR")).join("data").join("tokenizer.json")).unwrap();
@@ -51,8 +51,7 @@ fn main() -> ort::Result<()> {
 	for _ in 0..GEN_TOKENS {
 		let array = tokens.view().insert_axis(Axis(0)).insert_axis(Axis(1));
 		let outputs = session.run(inputs![array]?)?;
-		let generated_tokens: Tensor<f32> = outputs["output1"].extract_tensor()?;
-		let generated_tokens = generated_tokens.view();
+		let generated_tokens: ArrayViewD<f32> = outputs["output1"].try_extract_tensor()?;
 
 		// Collect and sort logits
 		let probabilities = &mut generated_tokens

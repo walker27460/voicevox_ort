@@ -1,21 +1,40 @@
 use std::{
-	collections::HashMap,
+	collections::BTreeMap,
 	ffi::c_void,
 	ops::{Deref, DerefMut, Index}
 };
 
-use crate::Value;
+use crate::{Allocator, DynValue};
 
+/// The outputs returned by a [`crate::Session`] inference call.
+///
+/// This type allows session outputs to be retrieved by index or by name.
+///
+/// ```
+/// # use ort::{GraphOptimizationLevel, Session};
+/// # fn main() -> ort::Result<()> {
+/// let session = Session::builder()?.commit_from_file("tests/data/upsample.onnx")?;
+/// let input = ndarray::Array4::<f32>::zeros((1, 64, 64, 3));
+/// let outputs = session.run(ort::inputs![input]?)?;
+///
+/// // get the first output
+/// let output = &outputs[0];
+/// // get an output by name
+/// let output = &outputs["Identity:0"];
+/// # 	Ok(())
+/// # }
+/// ```
+#[derive(Debug)]
 pub struct SessionOutputs<'s> {
-	map: HashMap<&'s str, Value>,
+	map: BTreeMap<&'s str, DynValue>,
 	idxs: Vec<&'s str>,
-	backing_ptr: Option<(*mut ort_sys::OrtAllocator, *mut c_void)>
+	backing_ptr: Option<(&'s Allocator, *mut c_void)>
 }
 
 unsafe impl<'s> Send for SessionOutputs<'s> {}
 
 impl<'s> SessionOutputs<'s> {
-	pub(crate) fn new(output_names: impl Iterator<Item = &'s str> + Clone, output_values: impl IntoIterator<Item = Value>) -> Self {
+	pub(crate) fn new(output_names: impl Iterator<Item = &'s str> + Clone, output_values: impl IntoIterator<Item = DynValue>) -> Self {
 		let map = output_names.clone().zip(output_values).collect();
 		Self {
 			map,
@@ -26,8 +45,8 @@ impl<'s> SessionOutputs<'s> {
 
 	pub(crate) fn new_backed(
 		output_names: impl Iterator<Item = &'s str> + Clone,
-		output_values: impl IntoIterator<Item = Value>,
-		allocator: *mut ort_sys::OrtAllocator,
+		output_values: impl IntoIterator<Item = DynValue>,
+		allocator: &'s Allocator,
 		backing_ptr: *mut c_void
 	) -> Self {
 		let map = output_names.clone().zip(output_values).collect();
@@ -40,7 +59,7 @@ impl<'s> SessionOutputs<'s> {
 
 	pub(crate) fn new_empty() -> Self {
 		Self {
-			map: HashMap::new(),
+			map: BTreeMap::new(),
 			idxs: Vec::new(),
 			backing_ptr: None
 		}
@@ -50,13 +69,13 @@ impl<'s> SessionOutputs<'s> {
 impl<'s> Drop for SessionOutputs<'s> {
 	fn drop(&mut self) {
 		if let Some((allocator, ptr)) = self.backing_ptr {
-			crate::ortfree![unsafe allocator, ptr];
+			unsafe { allocator.free(ptr) };
 		}
 	}
 }
 
 impl<'s> Deref for SessionOutputs<'s> {
-	type Target = HashMap<&'s str, Value>;
+	type Target = BTreeMap<&'s str, DynValue>;
 
 	fn deref(&self) -> &Self::Target {
 		&self.map
@@ -70,21 +89,21 @@ impl<'s> DerefMut for SessionOutputs<'s> {
 }
 
 impl<'s> Index<&str> for SessionOutputs<'s> {
-	type Output = Value;
+	type Output = DynValue;
 	fn index(&self, index: &str) -> &Self::Output {
 		self.map.get(index).expect("no entry found for key")
 	}
 }
 
 impl<'s> Index<String> for SessionOutputs<'s> {
-	type Output = Value;
+	type Output = DynValue;
 	fn index(&self, index: String) -> &Self::Output {
 		self.map.get(index.as_str()).expect("no entry found for key")
 	}
 }
 
 impl<'s> Index<usize> for SessionOutputs<'s> {
-	type Output = Value;
+	type Output = DynValue;
 	fn index(&self, index: usize) -> &Self::Output {
 		self.map.get(&self.idxs[index]).expect("no entry found for key")
 	}
