@@ -1,17 +1,18 @@
-#[cfg(not(target_family = "windows"))]
+#[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 #[cfg(target_family = "windows")]
 use std::os::windows::ffi::OsStrExt;
 #[cfg(feature = "fetch-models")]
 use std::path::PathBuf;
 use std::{
-	ffi::CString,
+	any::Any,
 	marker::PhantomData,
-	path::Path,
 	ptr::{self, NonNull},
 	rc::Rc,
 	sync::{atomic::Ordering, Arc}
 };
+#[cfg(not(target_arch = "wasm32"))]
+use std::{ffi::CString, path::Path};
 
 use super::{dangerous, InMemorySession, Input, Output, Session, SharedSessionInner};
 #[cfg(feature = "fetch-models")]
@@ -43,7 +44,7 @@ pub struct SessionBuilder {
 	pub(crate) session_options_ptr: NonNull<ort_sys::OrtSessionOptions>,
 	memory_info: Option<Rc<MemoryInfo>>,
 	#[cfg(feature = "operator-libraries")]
-	custom_runtime_handles: Vec<*mut std::os::raw::c_void>,
+	custom_runtime_handles: Vec<Arc<LibHandle>>,
 	operator_domains: Vec<Arc<OperatorDomain>>,
 	execution_providers: Vec<ExecutionProviderDispatch>
 }
@@ -53,7 +54,7 @@ impl Clone for SessionBuilder {
 		let mut session_options_ptr = ptr::null_mut();
 		status_to_result(ortsys![unsafe CloneSessionOptions(self.session_options_ptr.as_ptr(), ptr::addr_of_mut!(session_options_ptr))])
 			.expect("error cloning session options");
-		assert_non_null_pointer(session_options_ptr, "OrtSessionOptions").unwrap();
+		assert_non_null_pointer(session_options_ptr, "OrtSessionOptions").expect("Cloned session option pointer is null");
 		Self {
 			session_options_ptr: unsafe { NonNull::new_unchecked(session_options_ptr) },
 			memory_info: self.memory_info.clone(),
@@ -67,11 +68,6 @@ impl Clone for SessionBuilder {
 
 impl Drop for SessionBuilder {
 	fn drop(&mut self) {
-		#[cfg(feature = "operator-libraries")]
-		for &handle in &self.custom_runtime_handles {
-			close_lib_handle(handle);
-		}
-
 		ortsys![unsafe ReleaseSessionOptions(self.session_options_ptr.as_ptr())];
 	}
 }
@@ -170,6 +166,8 @@ impl SessionBuilder {
 	/// newly optimized model to the given path (for 'offline' graph optimization).
 	///
 	/// Note that the file will only be created after the model is committed.
+	#[cfg(not(target_arch = "wasm32"))]
+	#[cfg_attr(docsrs, doc(cfg(not(target_arch = "wasm32"))))]
 	pub fn with_optimized_model_path<S: AsRef<str>>(self, path: S) -> Result<Self> {
 		#[cfg(windows)]
 		let path = path.as_ref().encode_utf16().chain([0]).collect::<Vec<_>>();
@@ -181,6 +179,8 @@ impl SessionBuilder {
 
 	/// Enables profiling. Profile information will be writen to `profiling_file` after profiling completes.
 	/// See [`Session::end_profiling`].
+	#[cfg(not(target_arch = "wasm32"))]
+	#[cfg_attr(docsrs, doc(cfg(not(target_arch = "wasm32"))))]
 	pub fn with_profiling<S: AsRef<str>>(self, profiling_file: S) -> Result<Self> {
 		#[cfg(windows)]
 		let profiling_file = profiling_file.as_ref().encode_utf16().chain([0]).collect::<Vec<_>>();
@@ -209,8 +209,8 @@ impl SessionBuilder {
 	}
 
 	/// Registers a custom operator library at the given library path.
-	#[cfg(feature = "operator-libraries")]
-	#[cfg_attr(docsrs, doc(cfg(feature = "operator-libraries")))]
+	#[cfg(all(feature = "operator-libraries", not(target_arch = "wasm32")))]
+	#[cfg_attr(docsrs, doc(cfg(all(feature = "operator-libraries", not(target_arch = "wasm32")))))]
 	pub fn with_operator_library(mut self, lib_path: impl AsRef<str>) -> Result<Self> {
 		let path_cstr = CString::new(lib_path.as_ref())?;
 
@@ -218,23 +218,26 @@ impl SessionBuilder {
 
 		let status = ortsys![unsafe RegisterCustomOpsLibrary(self.session_options_ptr.as_ptr(), path_cstr.as_ptr(), &mut handle)];
 
+		let handle = LibHandle(handle);
 		// per RegisterCustomOpsLibrary docs, release handle if there was an error and the handle
 		// is non-null
 		if let Err(e) = status_to_result(status).map_err(Error::CreateSessionOptions) {
 			if !handle.is_null() {
 				// handle was written to, should release it
-				close_lib_handle(handle);
+				drop(handle);
 			}
 
 			return Err(e);
 		}
 
-		self.custom_runtime_handles.push(handle);
+		self.custom_runtime_handles.push(Arc::new(handle));
 
 		Ok(self)
 	}
 
 	/// Enables [`onnxruntime-extensions`](https://github.com/microsoft/onnxruntime-extensions) custom operators.
+	#[cfg(not(target_arch = "wasm32"))]
+	#[cfg_attr(docsrs, doc(cfg(not(target_arch = "wasm32"))))]
 	pub fn with_extensions(self) -> Result<Self> {
 		let status = ortsys![unsafe EnableOrtCustomOps(self.session_options_ptr.as_ptr())];
 		status_to_result(status).map_err(Error::CreateSessionOptions)?;
@@ -249,18 +252,18 @@ impl SessionBuilder {
 	}
 
 	/// Downloads a pre-trained ONNX model from the given URL and builds the session.
-	#[cfg(feature = "fetch-models")]
-	#[cfg_attr(docsrs, doc(cfg(feature = "fetch-models")))]
+	#[cfg(all(feature = "fetch-models", not(target_arch = "wasm32")))]
+	#[cfg_attr(docsrs, doc(cfg(all(feature = "fetch-models", not(target_arch = "wasm32")))))]
 	pub fn commit_from_url(self, model_url: impl AsRef<str>) -> Result<Session> {
 		let mut download_dir = ort_sys::internal::dirs::cache_dir()
 			.expect("could not determine cache directory")
 			.join("models");
 		if std::fs::create_dir_all(&download_dir).is_err() {
-			download_dir = std::env::current_dir().unwrap();
+			download_dir = std::env::current_dir().expect("Failed to obtain current working directory");
 		}
 
 		let url = model_url.as_ref();
-		let model_filename = PathBuf::from(url.split('/').last().unwrap());
+		let model_filename = PathBuf::from(url.split('/').last().expect("Missing filename in model URL"));
 		let model_filepath = download_dir.join(model_filename);
 		let downloaded_path = if model_filepath.exists() {
 			tracing::info!(model_filepath = format!("{}", model_filepath.display()).as_str(), "Model already exists, skipping download");
@@ -270,13 +273,15 @@ impl SessionBuilder {
 
 			let resp = ureq::get(url).call().map_err(Box::new).map_err(FetchModelError::FetchError)?;
 
-			assert!(resp.has("Content-Length"));
-			let len = resp.header("Content-Length").and_then(|s| s.parse::<usize>().ok()).unwrap();
+			let len = resp
+				.header("Content-Length")
+				.and_then(|s| s.parse::<usize>().ok())
+				.expect("Missing Content-Length header");
 			tracing::info!(len, "Downloading {} bytes", len);
 
 			let mut reader = resp.into_reader();
 
-			let f = std::fs::File::create(&model_filepath).unwrap();
+			let f = std::fs::File::create(&model_filepath).expect("Failed to create model file");
 			let mut writer = std::io::BufWriter::new(f);
 
 			let bytes_io_count = std::io::copy(&mut reader, &mut writer).map_err(FetchModelError::IoError)?;
@@ -295,7 +300,9 @@ impl SessionBuilder {
 	}
 
 	/// Loads an ONNX model from a file and builds the session.
-	pub fn commit_from_file<P>(self, model_filepath_ref: P) -> Result<Session>
+	#[cfg(not(target_arch = "wasm32"))]
+	#[cfg_attr(docsrs, doc(cfg(not(target_arch = "wasm32"))))]
+	pub fn commit_from_file<P>(mut self, model_filepath_ref: P) -> Result<Session>
 	where
 		P: AsRef<Path>
 	{
@@ -315,7 +322,7 @@ impl SessionBuilder {
             .collect();
 		#[cfg(not(target_family = "windows"))]
 		let model_path: Vec<std::os::raw::c_char> = model_path
-            .as_bytes()
+            .as_encoded_bytes()
             .iter()
             .chain(std::iter::once(&b'\0')) // Make sure we have a null terminated string
             .map(|b| *b as std::os::raw::c_char)
@@ -354,10 +361,16 @@ impl SessionBuilder {
 			.map(|i| dangerous::extract_output(session_ptr, &allocator, i))
 			.collect::<Result<Vec<Output>>>()?;
 
+		let extras = self.operator_domains.drain(..).map(|d| Box::new(d) as Box<dyn Any>);
+		#[cfg(feature = "operator-libraries")]
+		let extras = extras.chain(self.custom_runtime_handles.drain(..).map(|d| Box::new(d) as Box<dyn Any>));
+		let extras: Vec<Box<dyn Any>> = extras.collect();
+
 		Ok(Session {
 			inner: Arc::new(SharedSessionInner {
 				session_ptr,
 				allocator,
+				_extras: extras,
 				_environment: Arc::clone(env)
 			}),
 			inputs,
@@ -389,7 +402,7 @@ impl SessionBuilder {
 	}
 
 	/// Load an ONNX graph from memory and commit the session.
-	pub fn commit_from_memory(self, model_bytes: &[u8]) -> Result<Session> {
+	pub fn commit_from_memory(mut self, model_bytes: &[u8]) -> Result<Session> {
 		let mut session_ptr: *mut ort_sys::OrtSession = std::ptr::null_mut();
 
 		let env = get_environment()?;
@@ -429,10 +442,16 @@ impl SessionBuilder {
 			.map(|i| dangerous::extract_output(session_ptr, &allocator, i))
 			.collect::<Result<Vec<Output>>>()?;
 
+		let extras = self.operator_domains.drain(..).map(|d| Box::new(d) as Box<dyn Any>);
+		#[cfg(feature = "operator-libraries")]
+		let extras = extras.chain(self.custom_runtime_handles.drain(..).map(|d| Box::new(d) as Box<dyn Any>));
+		let extras: Vec<Box<dyn Any>> = extras.collect();
+
 		let session = Session {
 			inner: Arc::new(SharedSessionInner {
 				session_ptr,
 				allocator,
+				_extras: extras,
 				_environment: Arc::clone(env)
 			}),
 			inputs,
@@ -533,12 +552,26 @@ impl From<GraphOptimizationLevel> for ort_sys::GraphOptimizationLevel {
 	}
 }
 
-#[cfg(all(unix, feature = "operator-libraries"))]
-fn close_lib_handle(handle: *mut std::os::raw::c_void) {
-	unsafe { libc::dlclose(handle) };
+#[cfg(feature = "operator-libraries")]
+struct LibHandle(*mut std::os::raw::c_void);
+
+#[cfg(feature = "operator-libraries")]
+impl LibHandle {
+	pub(self) fn is_null(&self) -> bool {
+		self.0.is_null()
+	}
 }
 
-#[cfg(all(windows, feature = "operator-libraries"))]
-fn close_lib_handle(handle: *mut std::os::raw::c_void) {
-	unsafe { winapi::um::libloaderapi::FreeLibrary(handle as winapi::shared::minwindef::HINSTANCE) };
+#[cfg(feature = "operator-libraries")]
+impl Drop for LibHandle {
+	fn drop(&mut self) {
+		#[cfg(unix)]
+		unsafe {
+			libc::dlclose(self.0)
+		};
+		#[cfg(windows)]
+		unsafe {
+			winapi::um::libloaderapi::FreeLibrary(self.0 as winapi::shared::minwindef::HINSTANCE)
+		};
+	}
 }

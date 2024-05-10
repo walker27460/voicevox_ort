@@ -2,10 +2,10 @@
 	"$schema": "https://mintlify.com/schema.json",
 	"name": "ort",
 	"logo": {
-		"dark": "/banner.png",
-		"light": "/banner.png"
+		"dark": "/assets/banner.png",
+		"light": "/assets/banner.png"
 	},
-	"favicon": "/icon.png",
+	"favicon": "/assets/icon.png",
 	"colors": {
 		"primary": "#F74C00",
 		"light": "#F74C00",
@@ -22,7 +22,7 @@
 	"tabs": [
 		{
 			"name": "API Reference",
-			"url": "https://docs.rs/ort"
+			"url": "https://docs.rs/ort/2.0.0-rc.2/ort/"
 		}
 	],
 	"anchors": [
@@ -58,8 +58,8 @@
 			"group": "Setup",
 			"pages": [
 				"setup/platforms",
+				"setup/webassembly",
 				"setup/linking",
-				"setup/compiling-onnxruntime",
 				"setup/cargo-features"
 			]
 		},

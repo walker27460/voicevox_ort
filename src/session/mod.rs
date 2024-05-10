@@ -1,6 +1,6 @@
 //! Contains the [`Session`] and [`SessionBuilder`] types for managing ONNX Runtime sessions and performing inference.
 
-use std::{ffi::CString, marker::PhantomData, ops::Deref, os::raw::c_char, ptr::NonNull, sync::Arc};
+use std::{any::Any, ffi::CString, marker::PhantomData, ops::Deref, os::raw::c_char, ptr::NonNull, sync::Arc};
 
 use super::{
 	char_p_to_string,
@@ -34,6 +34,9 @@ pub use self::{
 pub struct SharedSessionInner {
 	pub(crate) session_ptr: NonNull<ort_sys::OrtSession>,
 	allocator: Allocator,
+	/// Additional things we may need to hold onto for the duration of this session, like [`crate::OperatorDomain`]s and
+	/// DLL handles for operator libraries.
+	_extras: Vec<Box<dyn Any>>,
 	_environment: Arc<Environment>
 }
 
@@ -315,13 +318,13 @@ impl Session {
 	) -> Result<SessionOutputs<'_>> {
 		let input_names_ptr: Vec<*const c_char> = input_names
 			.iter()
-			.map(|n| CString::new(n.as_bytes()).unwrap())
+			.map(|n| CString::new(n.as_bytes()).unwrap_or_else(|_| unreachable!()))
 			.map(|n| n.into_raw().cast_const())
 			.collect();
 		let output_names_ptr: Vec<*const c_char> = self
 			.outputs
 			.iter()
-			.map(|output| CString::new(output.name.as_str()).unwrap())
+			.map(|output| CString::new(output.name.as_str()).unwrap_or_else(|_| unreachable!()))
 			.map(|n| n.into_raw().cast_const())
 			.collect();
 
@@ -409,13 +412,13 @@ impl Session {
 
 		let input_name_ptrs: Vec<*const c_char> = input_names
 			.iter()
-			.map(|n| CString::new(n.as_bytes()).unwrap())
+			.map(|n| CString::new(n.as_bytes()).unwrap_or_else(|_| unreachable!()))
 			.map(|n| n.into_raw().cast_const())
 			.collect();
 		let output_name_ptrs: Vec<*const c_char> = self
 			.outputs
 			.iter()
-			.map(|output| CString::new(output.name.as_str()).unwrap())
+			.map(|output| CString::new(output.name.as_str()).unwrap_or_else(|_| unreachable!()))
 			.map(|n| n.into_raw().cast_const())
 			.collect();
 
