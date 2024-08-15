@@ -1,5 +1,8 @@
-use super::ExecutionProvider;
-use crate::{Error, ExecutionProviderDispatch, Result, SessionBuilder};
+use crate::{
+	error::{Error, Result},
+	execution_providers::{ExecutionProvider, ExecutionProviderDispatch},
+	session::SessionBuilder
+};
 
 #[cfg(all(not(feature = "load-dynamic"), feature = "directml"))]
 extern "C" {
@@ -26,7 +29,7 @@ impl DirectMLExecutionProvider {
 
 impl From<DirectMLExecutionProvider> for ExecutionProviderDispatch {
 	fn from(value: DirectMLExecutionProvider) -> Self {
-		ExecutionProviderDispatch::DirectML(value)
+		ExecutionProviderDispatch::new(value)
 	}
 }
 

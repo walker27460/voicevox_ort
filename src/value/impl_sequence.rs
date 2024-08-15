@@ -1,23 +1,38 @@
 use std::{
 	fmt::Debug,
 	marker::PhantomData,
-	ptr::{self, NonNull}
+	ptr::{self, NonNull},
+	sync::Arc
 };
 
-use super::{DowncastableTarget, ValueInner, ValueTypeMarker};
-use crate::{memory::Allocator, ortsys, Error, Result, Value, ValueRef, ValueRefMut, ValueType};
+use super::{DowncastableTarget, Value, ValueInner, ValueRef, ValueRefMut, ValueType, ValueTypeMarker};
+use crate::{
+	error::{Error, Result},
+	memory::Allocator,
+	ortsys
+};
 
-pub trait SequenceValueTypeMarker: ValueTypeMarker {}
+pub trait SequenceValueTypeMarker: ValueTypeMarker {
+	crate::private_trait!();
+}
 
 #[derive(Debug)]
 pub struct DynSequenceValueType;
-impl ValueTypeMarker for DynSequenceValueType {}
-impl SequenceValueTypeMarker for DynSequenceValueType {}
+impl ValueTypeMarker for DynSequenceValueType {
+	crate::private_impl!();
+}
+impl SequenceValueTypeMarker for DynSequenceValueType {
+	crate::private_impl!();
+}
 
 #[derive(Debug)]
 pub struct SequenceValueType<T: ValueTypeMarker + DowncastableTarget + Debug + ?Sized>(PhantomData<T>);
-impl<T: ValueTypeMarker + DowncastableTarget + Debug + ?Sized> ValueTypeMarker for SequenceValueType<T> {}
-impl<T: ValueTypeMarker + DowncastableTarget + Debug + ?Sized> SequenceValueTypeMarker for SequenceValueType<T> {}
+impl<T: ValueTypeMarker + DowncastableTarget + Debug + ?Sized> ValueTypeMarker for SequenceValueType<T> {
+	crate::private_impl!();
+}
+impl<T: ValueTypeMarker + DowncastableTarget + Debug + ?Sized> SequenceValueTypeMarker for SequenceValueType<T> {
+	crate::private_impl!();
+}
 
 pub type DynSequence = Value<DynSequenceValueType>;
 pub type Sequence<T> = Value<SequenceValueType<T>>;
@@ -89,11 +104,11 @@ impl<T: ValueTypeMarker + DowncastableTarget + Debug + Sized + 'static> Value<Se
 			nonNull(value_ptr)
 		];
 		Ok(Value {
-			inner: ValueInner::RustOwned {
+			inner: Arc::new(ValueInner::RustOwned {
 				ptr: unsafe { NonNull::new_unchecked(value_ptr) },
 				_array: Box::new(values),
 				_memory_info: None
-			},
+			}),
 			_markers: PhantomData
 		})
 	}
@@ -116,7 +131,7 @@ impl<T: ValueTypeMarker + DowncastableTarget + Debug + Sized> Value<SequenceValu
 		DynSequenceRef::new(unsafe {
 			Value::from_ptr_nodrop(
 				NonNull::new_unchecked(self.ptr()),
-				if let ValueInner::CppOwned { _session, .. } = &self.inner { _session.clone() } else { None }
+				if let ValueInner::CppOwned { _session, .. } = &*self.inner { _session.clone() } else { None }
 			)
 		})
 	}
@@ -127,7 +142,7 @@ impl<T: ValueTypeMarker + DowncastableTarget + Debug + Sized> Value<SequenceValu
 		DynSequenceRefMut::new(unsafe {
 			Value::from_ptr_nodrop(
 				NonNull::new_unchecked(self.ptr()),
-				if let ValueInner::CppOwned { _session, .. } = &self.inner { _session.clone() } else { None }
+				if let ValueInner::CppOwned { _session, .. } = &*self.inner { _session.clone() } else { None }
 			)
 		})
 	}

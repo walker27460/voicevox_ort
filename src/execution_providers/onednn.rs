@@ -1,5 +1,8 @@
-use super::ExecutionProvider;
-use crate::{Error, ExecutionProviderDispatch, Result, SessionBuilder};
+use crate::{
+	error::{Error, Result},
+	execution_providers::{ExecutionProvider, ExecutionProviderDispatch},
+	session::SessionBuilder
+};
 
 #[cfg(all(not(feature = "load-dynamic"), feature = "onednn"))]
 extern "C" {
@@ -29,7 +32,7 @@ impl OneDNNExecutionProvider {
 
 impl From<OneDNNExecutionProvider> for ExecutionProviderDispatch {
 	fn from(value: OneDNNExecutionProvider) -> Self {
-		ExecutionProviderDispatch::OneDNN(value)
+		ExecutionProviderDispatch::new(value)
 	}
 }
 

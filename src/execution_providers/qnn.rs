@@ -1,5 +1,8 @@
-use super::ExecutionProvider;
-use crate::{Error, ExecutionProviderDispatch, Result, SessionBuilder};
+use crate::{
+	error::{Error, Result},
+	execution_providers::{ExecutionProvider, ExecutionProviderDispatch},
+	session::SessionBuilder
+};
 
 #[derive(Debug, Clone)]
 pub enum QNNExecutionProviderPerformanceMode {
@@ -110,7 +113,7 @@ impl QNNExecutionProvider {
 
 impl From<QNNExecutionProvider> for ExecutionProviderDispatch {
 	fn from(value: QNNExecutionProvider) -> Self {
-		ExecutionProviderDispatch::QNN(value)
+		ExecutionProviderDispatch::new(value)
 	}
 }
 

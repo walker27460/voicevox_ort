@@ -1,5 +1,8 @@
-use super::ExecutionProvider;
-use crate::{Error, ExecutionProviderDispatch, Result, SessionBuilder};
+use crate::{
+	error::{Error, Result},
+	execution_providers::{ExecutionProvider, ExecutionProviderDispatch},
+	session::SessionBuilder
+};
 
 #[derive(Debug, Default, Clone)]
 pub struct TensorRTExecutionProvider {
@@ -210,7 +213,7 @@ impl TensorRTExecutionProvider {
 
 impl From<TensorRTExecutionProvider> for ExecutionProviderDispatch {
 	fn from(value: TensorRTExecutionProvider) -> Self {
-		ExecutionProviderDispatch::TensorRT(value)
+		ExecutionProviderDispatch::new(value)
 	}
 }
 
@@ -220,13 +223,18 @@ impl ExecutionProvider for TensorRTExecutionProvider {
 	}
 
 	fn supported_by_platform(&self) -> bool {
-		cfg!(any(all(target_os = "linux", any(target_os = "aarch64", target_os = "x86_64")), all(target_os = "windows", target_arch = "x86_64")))
+		cfg!(any(all(target_os = "linux", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64")))
 	}
 
 	#[allow(unused, unreachable_code)]
 	fn register(&self, session_builder: &SessionBuilder) -> Result<()> {
 		#[cfg(any(feature = "load-dynamic", feature = "tensorrt"))]
 		{
+			// The TensorRT execution provider specifically is pretty picky about requiring an environment to be initialized by the
+			// time we register it. This isn't always the case in `ort`, so if we get to this point, let's make sure we have an
+			// environment initialized.
+			let _ = crate::get_environment();
+
 			let mut trt_options: *mut ort_sys::OrtTensorRTProviderOptionsV2 = std::ptr::null_mut();
 			crate::error::status_to_result(crate::ortsys![unsafe CreateTensorRTProviderOptions(&mut trt_options)]).map_err(Error::ExecutionProvider)?;
 			let (key_ptrs, value_ptrs, len, keys, values) = super::map_keys! {

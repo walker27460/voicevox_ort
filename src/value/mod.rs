@@ -16,9 +16,15 @@ pub use self::{
 	impl_sequence::{
 		DynSequence, DynSequenceRef, DynSequenceRefMut, DynSequenceValueType, Sequence, SequenceRef, SequenceRefMut, SequenceValueType, SequenceValueTypeMarker
 	},
-	impl_tensor::{DynTensor, DynTensorRef, DynTensorRefMut, DynTensorValueType, Tensor, TensorRef, TensorRefMut, TensorValueTypeMarker}
+	impl_tensor::{DynTensor, DynTensorRef, DynTensorRefMut, DynTensorValueType, Tensor, TensorRef, TensorRefMut, TensorValueType, TensorValueTypeMarker}
 };
-use crate::{error::status_to_result, memory::MemoryInfo, ortsys, session::SharedSessionInner, tensor::TensorElementType, Error, Result};
+use crate::{
+	error::{status_to_result, Error, Result},
+	memory::MemoryInfo,
+	ortsys,
+	session::SharedSessionInner,
+	tensor::TensorElementType
+};
 
 /// The type of a [`Value`], or a session input/output.
 ///
@@ -85,6 +91,30 @@ pub enum ValueType {
 }
 
 impl ValueType {
+	pub(crate) fn from_type_info(typeinfo_ptr: *mut ort_sys::OrtTypeInfo) -> Result<Self> {
+		let mut ty: ort_sys::ONNXType = ort_sys::ONNXType::ONNX_TYPE_UNKNOWN;
+		ortsys![unsafe GetOnnxTypeFromTypeInfo(typeinfo_ptr, &mut ty) -> Error::GetOnnxTypeFromTypeInfo];
+		let io_type = match ty {
+			ort_sys::ONNXType::ONNX_TYPE_TENSOR | ort_sys::ONNXType::ONNX_TYPE_SPARSETENSOR => {
+				let mut info_ptr: *const ort_sys::OrtTensorTypeAndShapeInfo = std::ptr::null_mut();
+				ortsys![unsafe CastTypeInfoToTensorInfo(typeinfo_ptr, &mut info_ptr) -> Error::CastTypeInfoToTensorInfo; nonNull(info_ptr)];
+				unsafe { extract_data_type_from_tensor_info(info_ptr)? }
+			}
+			ort_sys::ONNXType::ONNX_TYPE_SEQUENCE => {
+				let mut info_ptr: *const ort_sys::OrtSequenceTypeInfo = std::ptr::null_mut();
+				ortsys![unsafe CastTypeInfoToSequenceTypeInfo(typeinfo_ptr, &mut info_ptr) -> Error::CastTypeInfoToSequenceTypeInfo; nonNull(info_ptr)];
+				unsafe { extract_data_type_from_sequence_info(info_ptr)? }
+			}
+			ort_sys::ONNXType::ONNX_TYPE_MAP => {
+				let mut info_ptr: *const ort_sys::OrtMapTypeInfo = std::ptr::null_mut();
+				ortsys![unsafe CastTypeInfoToMapTypeInfo(typeinfo_ptr, &mut info_ptr) -> Error::CastTypeInfoToMapTypeInfo; nonNull(info_ptr)];
+				unsafe { extract_data_type_from_map_info(info_ptr)? }
+			}
+			_ => unreachable!()
+		};
+		ortsys![unsafe ReleaseTypeInfo(typeinfo_ptr)];
+		Ok(io_type)
+	}
 	/// Returns the dimensions of this value type if it is a tensor, or `None` if it is a sequence or map.
 	///
 	/// ```
@@ -166,6 +196,14 @@ pub(crate) enum ValueInner {
 	}
 }
 
+impl ValueInner {
+	pub(crate) fn ptr(&self) -> *mut ort_sys::OrtValue {
+		match self {
+			ValueInner::CppOwned { ptr, .. } | ValueInner::RustOwned { ptr, .. } => ptr.as_ptr()
+		}
+	}
+}
+
 /// A temporary version of a [`Value`] with a lifetime specifier.
 #[derive(Debug)]
 pub struct ValueRef<'v, Type: ValueTypeMarker + ?Sized = DynValueTypeMarker> {
@@ -176,6 +214,14 @@ pub struct ValueRef<'v, Type: ValueTypeMarker + ?Sized = DynValueTypeMarker> {
 impl<'v, Type: ValueTypeMarker + ?Sized> ValueRef<'v, Type> {
 	pub(crate) fn new(inner: Value<Type>) -> Self {
 		ValueRef { inner, lifetime: PhantomData }
+	}
+
+	/// Attempts to downcast a temporary dynamic value (like [`DynValue`] or [`DynTensor`]) to a more strongly typed
+	/// variant, like [`TensorRef<T>`].
+	#[inline]
+	pub fn downcast<OtherType: ValueTypeMarker + DowncastableTarget + Debug + ?Sized>(self) -> Result<ValueRef<'v, OtherType>> {
+		let dt = self.dtype()?;
+		if OtherType::can_downcast(&dt) { Ok(unsafe { std::mem::transmute(self) }) } else { panic!() }
 	}
 
 	pub fn into_dyn(self) -> ValueRef<'v, DynValueTypeMarker> {
@@ -201,6 +247,14 @@ pub struct ValueRefMut<'v, Type: ValueTypeMarker + ?Sized = DynValueTypeMarker> 
 impl<'v, Type: ValueTypeMarker + ?Sized> ValueRefMut<'v, Type> {
 	pub(crate) fn new(inner: Value<Type>) -> Self {
 		ValueRefMut { inner, lifetime: PhantomData }
+	}
+
+	/// Attempts to downcast a temporary mutable dynamic value (like [`DynValue`] or [`DynTensor`]) to a more
+	/// strongly typed variant, like [`TensorRefMut<T>`].
+	#[inline]
+	pub fn downcast<OtherType: ValueTypeMarker + DowncastableTarget + Debug + ?Sized>(self) -> Result<ValueRefMut<'v, OtherType>> {
+		let dt = self.dtype()?;
+		if OtherType::can_downcast(&dt) { Ok(unsafe { std::mem::transmute(self) }) } else { panic!() }
 	}
 
 	pub fn into_dyn(self) -> ValueRefMut<'v, DynValueTypeMarker> {
@@ -261,8 +315,8 @@ impl<'v, Type: ValueTypeMarker + ?Sized> DerefMut for ValueRefMut<'v, Type> {
 /// - [`Tensor::extract_tensor`], [`Tensor::extract_raw_tensor`]
 #[derive(Debug)]
 pub struct Value<Type: ValueTypeMarker + ?Sized = DynValueTypeMarker> {
-	inner: ValueInner,
-	_markers: PhantomData<Type>
+	pub(crate) inner: Arc<ValueInner>,
+	pub(crate) _markers: PhantomData<Type>
 }
 
 /// A dynamic value, which could be a [`Tensor`], [`Sequence`], or [`Map`].
@@ -275,11 +329,15 @@ pub type DynValue = Value<DynValueTypeMarker>;
 ///
 /// For example, [`Tensor::try_extract_tensor`] can only be used on [`Value`]s with the [`TensorValueTypeMarker`] (which
 /// inherits this trait), i.e. [`Tensor`]s, [`DynTensor`]s, and [`DynValue`]s.
-pub trait ValueTypeMarker: Debug {}
+pub trait ValueTypeMarker: Debug {
+	crate::private_trait!();
+}
 
 /// Represents a type that a [`DynValue`] can be downcast to.
 pub trait DowncastableTarget: ValueTypeMarker {
 	fn can_downcast(dtype: &ValueType) -> bool;
+
+	crate::private_trait!();
 }
 
 // this implementation is used in case we want to extract `DynValue`s from a [`Sequence`]; see `try_extract_sequence`
@@ -287,15 +345,25 @@ impl DowncastableTarget for DynValueTypeMarker {
 	fn can_downcast(_: &ValueType) -> bool {
 		true
 	}
+
+	crate::private_impl!();
 }
 
 /// The dynamic type marker, used for values which can be of any type.
 #[derive(Debug)]
 pub struct DynValueTypeMarker;
-impl ValueTypeMarker for DynValueTypeMarker {}
-impl MapValueTypeMarker for DynValueTypeMarker {}
-impl SequenceValueTypeMarker for DynValueTypeMarker {}
-impl TensorValueTypeMarker for DynValueTypeMarker {}
+impl ValueTypeMarker for DynValueTypeMarker {
+	crate::private_impl!();
+}
+impl MapValueTypeMarker for DynValueTypeMarker {
+	crate::private_impl!();
+}
+impl SequenceValueTypeMarker for DynValueTypeMarker {
+	crate::private_impl!();
+}
+impl TensorValueTypeMarker for DynValueTypeMarker {
+	crate::private_impl!();
+}
 
 unsafe impl Send for Value {}
 
@@ -304,37 +372,14 @@ impl<Type: ValueTypeMarker + ?Sized> Value<Type> {
 	pub fn dtype(&self) -> Result<ValueType> {
 		let mut typeinfo_ptr: *mut ort_sys::OrtTypeInfo = std::ptr::null_mut();
 		ortsys![unsafe GetTypeInfo(self.ptr(), &mut typeinfo_ptr) -> Error::GetTypeInfo; nonNull(typeinfo_ptr)];
-
-		let mut ty: ort_sys::ONNXType = ort_sys::ONNXType::ONNX_TYPE_UNKNOWN;
-		ortsys![unsafe GetOnnxTypeFromTypeInfo(typeinfo_ptr, &mut ty) -> Error::GetOnnxTypeFromTypeInfo];
-		let io_type = match ty {
-			ort_sys::ONNXType::ONNX_TYPE_TENSOR | ort_sys::ONNXType::ONNX_TYPE_SPARSETENSOR => {
-				let mut info_ptr: *const ort_sys::OrtTensorTypeAndShapeInfo = std::ptr::null_mut();
-				ortsys![unsafe CastTypeInfoToTensorInfo(typeinfo_ptr, &mut info_ptr) -> Error::CastTypeInfoToTensorInfo; nonNull(info_ptr)];
-				unsafe { extract_data_type_from_tensor_info(info_ptr)? }
-			}
-			ort_sys::ONNXType::ONNX_TYPE_SEQUENCE => {
-				let mut info_ptr: *const ort_sys::OrtSequenceTypeInfo = std::ptr::null_mut();
-				ortsys![unsafe CastTypeInfoToSequenceTypeInfo(typeinfo_ptr, &mut info_ptr) -> Error::CastTypeInfoToSequenceTypeInfo; nonNull(info_ptr)];
-				unsafe { extract_data_type_from_sequence_info(info_ptr)? }
-			}
-			ort_sys::ONNXType::ONNX_TYPE_MAP => {
-				let mut info_ptr: *const ort_sys::OrtMapTypeInfo = std::ptr::null_mut();
-				ortsys![unsafe CastTypeInfoToMapTypeInfo(typeinfo_ptr, &mut info_ptr) -> Error::CastTypeInfoToMapTypeInfo; nonNull(info_ptr)];
-				unsafe { extract_data_type_from_map_info(info_ptr)? }
-			}
-			_ => unreachable!()
-		};
-
-		ortsys![unsafe ReleaseTypeInfo(typeinfo_ptr)];
-		Ok(io_type)
+		ValueType::from_type_info(typeinfo_ptr)
 	}
 
 	/// Construct a [`Value`] from a C++ [`ort_sys::OrtValue`] pointer.
 	///
 	/// If the value belongs to a session (i.e. if it is returned from [`crate::Session::run`] or
 	/// [`crate::IoBinding::run`]), you must provide the [`SharedSessionInner`] (acquired from
-	/// [`crate::Session::inner`]). This ensures the session is not dropped until the value is.
+	/// [`crate::Session::inner`]). This ensures the session is not dropped until any values owned by it is.
 	///
 	/// # Safety
 	///
@@ -343,7 +388,7 @@ impl<Type: ValueTypeMarker + ?Sized> Value<Type> {
 	#[must_use]
 	pub unsafe fn from_ptr(ptr: NonNull<ort_sys::OrtValue>, session: Option<Arc<SharedSessionInner>>) -> Value<Type> {
 		Value {
-			inner: ValueInner::CppOwned { ptr, drop: true, _session: session },
+			inner: Arc::new(ValueInner::CppOwned { ptr, drop: true, _session: session }),
 			_markers: PhantomData
 		}
 	}
@@ -353,16 +398,14 @@ impl<Type: ValueTypeMarker + ?Sized> Value<Type> {
 	#[must_use]
 	pub(crate) unsafe fn from_ptr_nodrop(ptr: NonNull<ort_sys::OrtValue>, session: Option<Arc<SharedSessionInner>>) -> Value<Type> {
 		Value {
-			inner: ValueInner::CppOwned { ptr, drop: false, _session: session },
+			inner: Arc::new(ValueInner::CppOwned { ptr, drop: false, _session: session }),
 			_markers: PhantomData
 		}
 	}
 
 	/// Returns the underlying [`ort_sys::OrtValue`] pointer.
 	pub fn ptr(&self) -> *mut ort_sys::OrtValue {
-		match &self.inner {
-			ValueInner::CppOwned { ptr, .. } | ValueInner::RustOwned { ptr, .. } => ptr.as_ptr()
-		}
+		self.inner.ptr()
 	}
 
 	/// Create a view of this value's data.
@@ -370,7 +413,7 @@ impl<Type: ValueTypeMarker + ?Sized> Value<Type> {
 		ValueRef::new(unsafe {
 			Value::from_ptr_nodrop(
 				NonNull::new_unchecked(self.ptr()),
-				if let ValueInner::CppOwned { _session, .. } = &self.inner { _session.clone() } else { None }
+				if let ValueInner::CppOwned { _session, .. } = &*self.inner { _session.clone() } else { None }
 			)
 		})
 	}
@@ -380,7 +423,7 @@ impl<Type: ValueTypeMarker + ?Sized> Value<Type> {
 		ValueRefMut::new(unsafe {
 			Value::from_ptr_nodrop(
 				NonNull::new_unchecked(self.ptr()),
-				if let ValueInner::CppOwned { _session, .. } = &self.inner { _session.clone() } else { None }
+				if let ValueInner::CppOwned { _session, .. } = &*self.inner { _session.clone() } else { None }
 			)
 		})
 	}
@@ -426,7 +469,7 @@ impl Value<DynValueTypeMarker> {
 			Ok(ValueRef::new(unsafe {
 				Value::from_ptr_nodrop(
 					NonNull::new_unchecked(self.ptr()),
-					if let ValueInner::CppOwned { _session, .. } = &self.inner { _session.clone() } else { None }
+					if let ValueInner::CppOwned { _session, .. } = &*self.inner { _session.clone() } else { None }
 				)
 			}))
 		} else {
@@ -434,7 +477,7 @@ impl Value<DynValueTypeMarker> {
 		}
 	}
 
-	/// Attempts to upcast a dynamic value (like [`DynValue`] or [`DynTensor`]) to a more strongly typed
+	/// Attempts to downcast a dynamic value (like [`DynValue`] or [`DynTensor`]) to a more strongly typed
 	/// mutable-reference variant, like [`TensorRefMut<T>`].
 	#[inline]
 	pub fn downcast_mut<OtherType: ValueTypeMarker + DowncastableTarget + Debug + ?Sized>(&mut self) -> Result<ValueRefMut<'_, OtherType>> {
@@ -443,7 +486,7 @@ impl Value<DynValueTypeMarker> {
 			Ok(ValueRefMut::new(unsafe {
 				Value::from_ptr_nodrop(
 					NonNull::new_unchecked(self.ptr()),
-					if let ValueInner::CppOwned { _session, .. } = &self.inner { _session.clone() } else { None }
+					if let ValueInner::CppOwned { _session, .. } = &*self.inner { _session.clone() } else { None }
 				)
 			}))
 		} else {
@@ -452,17 +495,17 @@ impl Value<DynValueTypeMarker> {
 	}
 }
 
-impl<Type: ValueTypeMarker + ?Sized> Drop for Value<Type> {
+impl Drop for ValueInner {
 	fn drop(&mut self) {
 		let ptr = self.ptr();
 		tracing::trace!(
 			"dropping {} value at {ptr:p}",
-			match &self.inner {
+			match self {
 				ValueInner::RustOwned { .. } => "rust-owned",
 				ValueInner::CppOwned { .. } => "cpp-owned"
 			}
 		);
-		if !matches!(&self.inner, ValueInner::CppOwned { drop: false, .. }) {
+		if !matches!(self, ValueInner::CppOwned { drop: false, .. }) {
 			ortsys![unsafe ReleaseValue(ptr)];
 		}
 	}

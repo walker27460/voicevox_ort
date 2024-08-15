@@ -2,7 +2,10 @@
 use std::ptr;
 
 #[cfg(feature = "ndarray")]
-use crate::{ortsys, Error, Result};
+use crate::{
+	error::{Error, Result},
+	ortsys
+};
 
 /// Enum mapping ONNX Runtime's supported tensor data types.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -91,6 +94,12 @@ impl From<ort_sys::ONNXTensorElementDataType> for TensorElementType {
 pub trait IntoTensorElementType {
 	/// Returns the ONNX tensor element data type corresponding to the given Rust type.
 	fn into_tensor_element_type() -> TensorElementType;
+
+	crate::private_trait!();
+}
+
+pub trait PrimitiveTensorElementType: IntoTensorElementType {
+	crate::private_trait!();
 }
 
 macro_rules! impl_type_trait {
@@ -99,6 +108,12 @@ macro_rules! impl_type_trait {
 			fn into_tensor_element_type() -> TensorElementType {
 				TensorElementType::$variant
 			}
+
+			crate::private_impl!();
+		}
+
+		impl PrimitiveTensorElementType for $type_ {
+			crate::private_impl!();
 		}
 	};
 }
@@ -120,6 +135,14 @@ impl_type_trait!(u64, Uint64);
 #[cfg(feature = "half")]
 #[cfg_attr(docsrs, doc(cfg(feature = "half")))]
 impl_type_trait!(half::bf16, Bfloat16);
+
+impl IntoTensorElementType for String {
+	fn into_tensor_element_type() -> TensorElementType {
+		TensorElementType::String
+	}
+
+	crate::private_impl!();
+}
 
 /// Adapter for common Rust string types to ONNX strings.
 pub trait Utf8Data {
