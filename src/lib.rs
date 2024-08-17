@@ -23,6 +23,9 @@ pub(crate) mod metadata;
 pub(crate) mod operator;
 pub(crate) mod session;
 pub(crate) mod tensor;
+#[cfg(feature = "training")]
+pub(crate) mod training;
+pub(crate) mod util;
 pub(crate) mod value;
 #[cfg_attr(docsrs, doc(cfg(target_arch = "wasm32")))]
 #[cfg(target_arch = "wasm32")]
@@ -61,18 +64,21 @@ pub use self::operator::{
 	InferShapeFn, Operator, OperatorDomain
 };
 pub use self::session::{
-	GraphOptimizationLevel, InMemorySession, Input, Output, RunOptions, Session, SessionBuilder, SessionInputValue, SessionInputs, SessionOutputs,
-	SharedSessionInner
+	GraphOptimizationLevel, HasSelectedOutputs, InMemorySession, InferenceFut, Input, NoSelectedOutputs, Output, OutputSelector, RunOptions,
+	SelectedOutputMarker, Session, SessionBuilder, SessionInputValue, SessionInputs, SessionOutputs, SharedSessionInner
 };
 #[cfg(feature = "ndarray")]
 #[cfg_attr(docsrs, doc(cfg(feature = "ndarray")))]
 pub use self::tensor::ArrayExtensions;
-pub use self::tensor::{IntoTensorElementType, TensorElementType};
+pub use self::tensor::{IntoTensorElementType, PrimitiveTensorElementType, TensorElementType, Utf8Data};
+#[cfg(feature = "training")]
+#[cfg_attr(docsrs, doc(cfg(feature = "training")))]
+pub use self::training::*;
 pub use self::value::{
 	DowncastableTarget, DynMap, DynMapRef, DynMapRefMut, DynMapValueType, DynSequence, DynSequenceRef, DynSequenceRefMut, DynSequenceValueType, DynTensor,
 	DynTensorRef, DynTensorRefMut, DynTensorValueType, DynValue, DynValueTypeMarker, Map, MapRef, MapRefMut, MapValueType, MapValueTypeMarker, Sequence,
-	SequenceRef, SequenceRefMut, SequenceValueType, SequenceValueTypeMarker, Tensor, TensorRef, TensorRefMut, TensorValueTypeMarker, Value, ValueRef,
-	ValueRefMut, ValueType, ValueTypeMarker
+	SequenceRef, SequenceRefMut, SequenceValueType, SequenceValueTypeMarker, Tensor, TensorRef, TensorRefMut, TensorValueType, TensorValueTypeMarker, Value,
+	ValueRef, ValueRefMut, ValueType, ValueTypeMarker
 };
 
 /// このクレートのフィーチャが指定された状態になっていなければコンパイルエラー。
@@ -294,7 +300,7 @@ fn create_env(api: NonNull<ort_sys::OrtApi>, tp_options: Option<EnvironmentGloba
 	G_ORT_API_FOR_ENV_BUILD.set(Some(api));
 	let _unset_api = UnsetOrtApi;
 
-	let mut env = EnvironmentBuilder::default().with_name(env!("CARGO_PKG_NAME"));
+	let mut env = EnvironmentBuilder::new().with_name(env!("CARGO_PKG_NAME"));
 	if let Some(tp_options) = tp_options {
 		env = env.with_global_thread_pool(tp_options);
 	}
@@ -319,6 +325,23 @@ pub(crate) static G_ORT_API: OnceLock<AtomicPtr<ort_sys::OrtApi>> = OnceLock::ne
 /// May panic if:
 /// - Getting the `OrtApi` struct fails, due to `ort` loading an unsupported version of ONNX Runtime.
 /// - Loading the ONNX Runtime dynamic library fails if the `load-dynamic` feature is enabled.
+///
+/// # Examples
+/// The primary (public-facing) use case for this function is accessing APIs that do not have a corresponding safe
+/// implementation in `ort`. For example, [`GetBuildInfoString`](https://onnxruntime.ai/docs/api/c/struct_ort_api.html#a0a7dba37b0017c0ef3a0ab4e266a967d):
+///
+/// ```
+/// # use std::ffi::CStr;
+/// # fn main() -> ort::Result<()> {
+/// let api = ort::api().as_ptr();
+/// let build_info = unsafe { CStr::from_ptr((*api).GetBuildInfoString.unwrap()()) };
+/// println!("{}", build_info.to_string_lossy());
+/// // ORT Build Info: git-branch=HEAD, git-commit-id=4573740, build type=Release, cmake cxx flags: /DWIN32 /D_WINDOWS /EHsc /EHsc /wd26812 -DEIGEN_HAS_C99_MATH -DCPUINFO_SUPPORTED
+/// # Ok(())
+/// # }
+/// ```
+///
+/// For the full list of ONNX Runtime APIs, consult the [`ort_sys::OrtApi`] struct and the [ONNX Runtime C API](https://onnxruntime.ai/docs/api/c/struct_ort_api.html).
 pub fn api() -> NonNull<ort_sys::OrtApi> {
 	#[cfg(feature = "__init-for-voicevox")]
 	if true {
@@ -435,6 +458,26 @@ pub(crate) fn char_p_to_string(raw: *const c_char) -> Result<String> {
 	}
 	.map_err(Error::FfiStringConversion)
 }
+
+pub(crate) struct PrivateTraitMarker;
+
+macro_rules! private_trait {
+	() => {
+		#[doc(hidden)]
+		#[allow(private_interfaces)]
+		fn _private() -> crate::PrivateTraitMarker;
+	};
+}
+macro_rules! private_impl {
+	() => {
+		#[allow(private_interfaces)]
+		fn _private() -> crate::PrivateTraitMarker {
+			crate::PrivateTraitMarker
+		}
+	};
+}
+pub(crate) use private_impl;
+pub(crate) use private_trait;
 
 #[cfg(test)]
 mod test {

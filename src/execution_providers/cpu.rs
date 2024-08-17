@@ -1,5 +1,9 @@
-use super::ExecutionProvider;
-use crate::{error::status_to_result, ortsys, Error, ExecutionProviderDispatch, Result, SessionBuilder};
+use crate::{
+	error::{status_to_result, Error, Result},
+	execution_providers::{ExecutionProvider, ExecutionProviderDispatch},
+	ortsys,
+	session::SessionBuilder
+};
 
 #[derive(Debug, Default, Clone)]
 pub struct CPUExecutionProvider {
@@ -21,7 +25,7 @@ impl CPUExecutionProvider {
 
 impl From<CPUExecutionProvider> for ExecutionProviderDispatch {
 	fn from(value: CPUExecutionProvider) -> Self {
-		ExecutionProviderDispatch::CPU(value)
+		ExecutionProviderDispatch::new(value)
 	}
 }
 

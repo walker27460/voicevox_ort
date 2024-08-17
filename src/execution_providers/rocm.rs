@@ -1,7 +1,10 @@
 use std::os::raw::c_void;
 
-use super::ExecutionProvider;
-use crate::{ArenaExtendStrategy, Error, ExecutionProviderDispatch, Result, SessionBuilder};
+use crate::{
+	error::{Error, Result},
+	execution_providers::{ArenaExtendStrategy, ExecutionProvider, ExecutionProviderDispatch},
+	session::SessionBuilder
+};
 
 #[derive(Debug, Clone)]
 pub struct ROCmExecutionProvider {
@@ -106,7 +109,7 @@ impl ROCmExecutionProvider {
 
 impl From<ROCmExecutionProvider> for ExecutionProviderDispatch {
 	fn from(value: ROCmExecutionProvider) -> Self {
-		ExecutionProviderDispatch::ROCm(value)
+		ExecutionProviderDispatch::new(value)
 	}
 }
 

@@ -1,7 +1,7 @@
-#[cfg(unix)]
-use std::os::unix::ffi::OsStrExt;
-#[cfg(target_family = "windows")]
-use std::os::windows::ffi::OsStrExt;
+#[cfg(any(feature = "operator-libraries", not(windows)))]
+use std::ffi::CString;
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::Path;
 #[cfg(feature = "fetch-models")]
 use std::path::PathBuf;
 use std::{
@@ -11,8 +11,6 @@ use std::{
 	rc::Rc,
 	sync::{atomic::Ordering, Arc}
 };
-#[cfg(not(target_arch = "wasm32"))]
-use std::{ffi::CString, path::Path};
 
 use super::{dangerous, InMemorySession, Input, Output, Session, SharedSessionInner};
 #[cfg(feature = "fetch-models")]
@@ -21,8 +19,9 @@ use crate::{
 	environment::get_environment,
 	error::{assert_non_null_pointer, status_to_result, Error, Result},
 	execution_providers::{apply_execution_providers, ExecutionProviderDispatch},
-	memory::Allocator,
-	ortsys, MemoryInfo, OperatorDomain
+	memory::{Allocator, MemoryInfo},
+	operator::OperatorDomain,
+	ortsys
 };
 
 /// Creates a session using the builder pattern.
@@ -112,7 +111,7 @@ impl SessionBuilder {
 	///   `CUDAExecutionProvider`) **is discouraged** unless you allow the user to configure the execution providers by
 	///   providing a `Vec` of [`ExecutionProviderDispatch`]es.
 	pub fn with_execution_providers(self, execution_providers: impl IntoIterator<Item = ExecutionProviderDispatch>) -> Result<Self> {
-		apply_execution_providers(&self, execution_providers.into_iter());
+		apply_execution_providers(&self, execution_providers.into_iter())?;
 		Ok(self)
 	}
 
@@ -313,23 +312,10 @@ impl SessionBuilder {
 			});
 		}
 
-		// Build an OsString, then a vector of bytes to pass to C
-		let model_path = std::ffi::OsString::from(model_filepath);
-		#[cfg(target_family = "windows")]
-		let model_path: Vec<u16> = model_path
-            .encode_wide()
-            .chain(std::iter::once(0)) // Make sure we have a null terminated string
-            .collect();
-		#[cfg(not(target_family = "windows"))]
-		let model_path: Vec<std::os::raw::c_char> = model_path
-            .as_encoded_bytes()
-            .iter()
-            .chain(std::iter::once(&b'\0')) // Make sure we have a null terminated string
-            .map(|b| *b as std::os::raw::c_char)
-            .collect();
+		let model_path = crate::util::path_to_os_char(model_filepath);
 
 		let env = get_environment()?;
-		apply_execution_providers(&self, env.execution_providers.iter().cloned());
+		apply_execution_providers(&self, env.execution_providers.iter().cloned())?;
 
 		if env.has_global_threadpool {
 			ortsys![unsafe DisablePerSessionThreads(self.session_options_ptr.as_ptr()) -> Error::CreateSessionOptions];
@@ -406,7 +392,7 @@ impl SessionBuilder {
 		let mut session_ptr: *mut ort_sys::OrtSession = std::ptr::null_mut();
 
 		let env = get_environment()?;
-		apply_execution_providers(&self, env.execution_providers.iter().cloned());
+		apply_execution_providers(&self, env.execution_providers.iter().cloned())?;
 
 		if env.has_global_threadpool {
 			ortsys![unsafe DisablePerSessionThreads(self.session_options_ptr.as_ptr()) -> Error::CreateSessionOptions];

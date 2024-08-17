@@ -3,6 +3,8 @@ title: Execution providers
 description: Learn how to enable execution providers to leverage hardware acceleration.
 ---
 
+import { Callout, Tabs } from 'nextra/components';
+
 Execution providers (EPs) enable ONNX Runtime to execute ONNX graphs with hardware acceleration. If you have specialized hardware like a GPU or NPU, execution providers can provide a massive performance boost to your `ort` applications. For more information on the intricacies of execution providers, see the [ONNX Runtime docs](https://onnxruntime.ai/docs/execution-providers/).
 
 ONNX Runtime must be compiled with support for each execution provider. pyke provides precompiled binaries for some of the most common EPs, so you won't need to compile ONNX Runtime from source. Below is a table showing available EPs, their support in `ort`, and their binary availability status.
@@ -28,12 +30,12 @@ ONNX Runtime must be compiled with support for each execution provider. pyke pro
 | Microsoft Azure | ❌ | ❌ | ❓ |
 | Rockchip RKNPU | ❌ | ❌ | ❓ |
 
-<Note>
+<Callout type='default'>
     Some EPs supported by ONNX Runtime are not supported by `ort` due to a lack of hardware for testing. If your preferred EP is missing support and you've got the hardware, please [open an issue](https://github.com/pykeio/ort/issues/new)!
-</Note>
+</Callout>
 
 ## Registering execution providers
-<Info>
+<Callout type='info'>
     To use an execution provider with `ort`, you'll need to enable its respective Cargo feature, e.g. the `cuda` feature to use CUDA, or the `coreml` feature to use CoreML.
 
     ```toml Cargo.toml
@@ -42,7 +44,7 @@ ONNX Runtime must be compiled with support for each execution provider. pyke pro
     ```
 
     See [Cargo features](/setup/cargo-features) for the full list of features.
-</Info>
+</Callout>
 
 In order to configure sessions to use certain execution providers, you must **register** them when creating an environment or session. You can do this via the `SessionBuilder::with_execution_providers` method. For example, to register the CUDA execution provider for a session:
 
@@ -81,7 +83,7 @@ fn main() -> anyhow::Result<()> {
 ```
 
 ## Configuring EPs
-EPs have configuration options to control behavior or increase performance. Each `XXXExecutionProvider` struct returns a builder with configuration methods. See the [API reference](https://docs.rs/ort/2.0.0-rc.2/ort/index.html?search=ExecutionProvider) for the EP structs for more information on which options are supported and what they do.
+EPs have configuration options to control behavior or increase performance. Each `XXXExecutionProvider` struct returns a builder with configuration methods. See the [API reference](https://docs.rs/ort/2.0.0-rc.4/ort/index.html?search=ExecutionProvider) for the EP structs for more information on which options are supported and what they do.
 
 ```rust
 use ort::{CoreMLExecutionProvider, Session};
@@ -105,7 +107,22 @@ fn main() -> anyhow::Result<()> {
 ## Fallback behavior
 `ort` will silently fail and fall back to executing on the CPU if all execution providers fail to register. In many cases, though, you'll want to show the user an error message when an EP fails to register, or outright abort the process.
 
-To receive these registration errors, instead use `ExecutionProvider::register` to register an execution provider:
+You can configure an EP to return an error on failure by adding `.error_on_failure()` after you `.build()` it. In this example, if CUDA doesn't register successfully, the program will exit with an error at `with_execution_providers`:
+```rust
+use ort::{CoreMLExecutionProvider, Session};
+
+fn main() -> anyhow::Result<()> {
+    let session = Session::builder()?
+        .with_execution_providers([
+            CUDAExecutionProvider::default().build().error_on_failure()
+        ])?
+        .commit_from_file("model.onnx")?;
+
+    Ok(())
+}
+```
+
+If you require more complex error handling, you can also manually register execution providers via the `ExecutionProvider::register` method:
 
 ```rust
 use ort::{CUDAExecutionProvider, ExecutionProvider, Session};
@@ -167,9 +184,9 @@ fn main() -> anyhow::Result<()> {
 }
 ```
 
-<Warning>
+<Callout type='warning'>
     `ort::init` must come before you create any sessions, otherwise the configuration will not take effect!
-</Warning>
+</Callout>
 
 Sessions configured with their own execution providers will *extend* the execution provider defaults, rather than overriding them.
 
@@ -178,35 +195,40 @@ If it seems like the execution provider is not registering properly, or you are 
 
 ## Notes
 
+### CUDA
+`ort` provides binaries for both CUDA 11 and CUDA 12; `ort` will automatically choose which binary to install based on whether CUDA 12 is installed.
+
+CUDA 11 requires cuDNN 8.x. CUDA 12 requires cuDNN 9.x. Make sure the correct version of cuDNN is installed and available on the `PATH`.
+
 ### CoreML
 Statically linking to CoreML (the default behavior when using downloaded binaries + the `coreml` Cargo feature) requires an additional Rust flag in order to link properly. You'll need to provide the flag `-C link-arg=-fapple-link-rtlib` to `rustc`. You can do this via an entry in [`.cargo/config.toml`](https://doc.rust-lang.org/cargo/reference/config.html#hierarchical-structure), in a build script, or in an environment variable.
 
-<Tabs>
-    <Tab title="Cargo config">
+<Tabs items={['Cargo config', 'Build script', 'Environment variable']}>
+    <Tabs.Tab title="Cargo config">
         See [Configuration: Hierarchical structure](https://doc.rust-lang.org/cargo/reference/config.html#hierarchical-structure) for more information on where the configuration file can be placed.
 
-        ```toml .cargo/config.toml
+        ```toml filename=".cargo/config.toml" copy
         [target.aarch64-apple-darwin]
         rustflags = ["-Clink-arg=-fapple-link-rtlib"]
 
         [target.x86_64-apple-darwin]
         rustflags = ["-Clink-arg=-fapple-link-rtlib"]
         ```
-    </Tab>
-    <Tab title="Build script">
+    </Tabs.Tab>
+    <Tabs.Tab title="Build script">
         Add the following to the `build.rs` script of any **binary** crate that uses `ort`.
 
-        ```rust build.rs
+        ```rust filename="build.rs" copy
         fn main() {
             println!("cargo:rustc-link-arg=-fapple-link-rtlib");
         }
         ```
 
         Library crates do not need this flag, and the usage of it in a library crate will not transitively apply to any binary crates dependent on it.
-    </Tab>
-    <Tab title="Environment variable">
-        ```shell
+    </Tabs.Tab>
+    <Tabs.Tab title="Environment variable">
+        ```shell copy
         $ RUSTFLAGS="-Clink-arg=-fapple-link-rtlib" cargo build
         ```
-    </Tab>
+    </Tabs.Tab>
 </Tabs>

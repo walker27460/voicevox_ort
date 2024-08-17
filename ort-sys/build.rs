@@ -1,7 +1,11 @@
 use std::{
 	env, fs,
-	path::{Path, PathBuf}
+	path::{Path, PathBuf},
+	process::Command
 };
+
+#[allow(unused)]
+const ONNXRUNTIME_VERSION: &str = "1.18.1";
 
 const ORT_ENV_SYSTEM_LIB_LOCATION: &str = "ORT_LIB_LOCATION";
 const ORT_ENV_SYSTEM_LIB_PROFILE: &str = "ORT_LIB_PROFILE";
@@ -35,36 +39,13 @@ fn fetch_file(source_url: &str) -> Vec<u8> {
 	buffer
 }
 
-fn find_dist(target: &str, designator: &str) -> Option<(&'static str, &'static str)> {
+fn find_dist(target: &str, feature_set: &str) -> Option<(&'static str, &'static str)> {
 	DIST_TABLE
 		.split('\n')
 		.filter(|c| !c.is_empty() && !c.starts_with('#'))
 		.map(|c| c.split('\t').collect::<Vec<_>>())
-		.find(|c| c[0] == designator && c[1] == target)
+		.find(|c| c[0] == feature_set && c[1] == target)
 		.map(|c| (c[2], c[3]))
-}
-
-fn lib_exists(name: &str) -> bool {
-	#[cfg(any(target_family = "windows", unix))]
-	let lib_str = std::ffi::CString::new(name).unwrap();
-	// note that we're not performing any cleanup here because this is a short lived build script; the OS will clean it up
-	// for us when we finish
-	#[cfg(target_family = "windows")]
-	return unsafe {
-		extern "C" {
-			fn LoadLibraryA(lplibfilename: *const std::ffi::c_char) -> isize;
-		}
-		LoadLibraryA(lib_str.as_ptr()) != 0
-	};
-	#[cfg(unix)]
-	return unsafe {
-		extern "C" {
-			fn dlopen(file: *const std::ffi::c_char, mode: std::ffi::c_int) -> *const std::ffi::c_void;
-		}
-		!dlopen(lib_str.as_ptr(), 1).is_null()
-	};
-	#[cfg(not(any(target_family = "windows", unix)))]
-	return false;
 }
 
 #[cfg(feature = "download-binaries")]
@@ -134,7 +115,7 @@ fn copy_libraries(lib_dir: &Path, out_dir: &Path) {
 		#[cfg(target_os = "linux")]
 		{
 			let main_dy = lib_dir.join("libonnxruntime.so");
-			let versioned_dy = out_dir.join("libonnxruntime.so.1.17.3");
+			let versioned_dy = out_dir.join(format!("libonnxruntime.so.{}", ONNXRUNTIME_VERSION));
 			if main_dy.exists() && !versioned_dy.exists() {
 				if versioned_dy.is_symlink() {
 					fs::remove_file(&versioned_dy).unwrap();
@@ -255,8 +236,12 @@ fn prepare_libort_dir() -> (PathBuf, bool) {
 					println!("cargo:rustc-link-lib=static=onnx");
 					println!("cargo:rustc-link-lib=static=onnx_proto");
 
-					add_search_dir(transform_dep(external_lib_dir.join("google_nsync-build"), &profile));
-					println!("cargo:rustc-link-lib=static=nsync_cpp");
+					let nsync_path = transform_dep(external_lib_dir.join("google_nsync-build"), &profile);
+					// some builds of ONNX Runtime, particularly the default no-EP windows build, don't require nsync
+					if nsync_path.exists() {
+						add_search_dir(nsync_path);
+						println!("cargo:rustc-link-lib=static=nsync_cpp");
+					}
 
 					if target_arch != "wasm32" {
 						add_search_dir(transform_dep(external_lib_dir.join("pytorch_cpuinfo-build"), &profile));
@@ -275,6 +260,9 @@ fn prepare_libort_dir() -> (PathBuf, bool) {
 
 					add_search_dir(transform_dep(external_lib_dir.join("abseil_cpp-build").join("absl").join("base"), &profile));
 					println!("cargo:rustc-link-lib=static=absl_base");
+					println!("cargo:rustc-link-lib=static=absl_spinlock_wait");
+					println!("cargo:rustc-link-lib=static=absl_malloc_internal");
+					println!("cargo:rustc-link-lib=static=absl_raw_logging_internal");
 					println!("cargo:rustc-link-lib=static=absl_throw_delegate");
 					add_search_dir(transform_dep(external_lib_dir.join("abseil_cpp-build").join("absl").join("hash"), &profile));
 					println!("cargo:rustc-link-lib=static=absl_hash");
@@ -282,6 +270,23 @@ fn prepare_libort_dir() -> (PathBuf, bool) {
 					println!("cargo:rustc-link-lib=static=absl_low_level_hash");
 					add_search_dir(transform_dep(external_lib_dir.join("abseil_cpp-build").join("absl").join("container"), &profile));
 					println!("cargo:rustc-link-lib=static=absl_raw_hash_set");
+					add_search_dir(transform_dep(external_lib_dir.join("abseil_cpp-build").join("absl").join("synchronization"), &profile));
+					println!("cargo:rustc-link-lib=static=absl_kernel_timeout_internal");
+					println!("cargo:rustc-link-lib=static=absl_graphcycles_internal");
+					println!("cargo:rustc-link-lib=static=absl_synchronization");
+					add_search_dir(transform_dep(external_lib_dir.join("abseil_cpp-build").join("absl").join("time"), &profile));
+					println!("cargo:rustc-link-lib=static=absl_time_zone");
+					println!("cargo:rustc-link-lib=static=absl_time");
+					add_search_dir(transform_dep(external_lib_dir.join("abseil_cpp-build").join("absl").join("numeric"), &profile));
+					println!("cargo:rustc-link-lib=static=absl_int128");
+					add_search_dir(transform_dep(external_lib_dir.join("abseil_cpp-build").join("absl").join("strings"), &profile));
+					println!("cargo:rustc-link-lib=static=absl_str_format_internal");
+					println!("cargo:rustc-link-lib=static=absl_strings");
+					println!("cargo:rustc-link-lib=static=absl_string_view");
+					println!("cargo:rustc-link-lib=static=absl_strings_internal");
+					add_search_dir(transform_dep(external_lib_dir.join("abseil_cpp-build").join("absl").join("debugging"), &profile));
+					println!("cargo:rustc-link-lib=static=absl_symbolize");
+					println!("cargo:rustc-link-lib=static=absl_stacktrace");
 
 					if cfg!(feature = "coreml") && (target_os == "macos" || target_os == "ios") {
 						println!("cargo:rustc-link-lib=framework=CoreML");
@@ -334,31 +339,75 @@ fn prepare_libort_dir() -> (PathBuf, bool) {
 			compile_error!("unsupported EP");
 
 			let target = env::var("TARGET").unwrap().to_string();
-			let designator = if cfg!(any(feature = "cuda", feature = "tensorrt")) {
-				if lib_exists("cudart64_12.dll") || lib_exists("libcudart.so.12") { "cu12" } else { "cu11" }
+
+			let mut feature_set = Vec::new();
+			if cfg!(feature = "training") {
+				feature_set.push("train");
+			}
+			if cfg!(any(feature = "cuda", feature = "tensorrt")) {
+				// pytorch's CUDA docker images set `NV_CUDNN_VERSION`
+				let cu12_tag = match env::var("NV_CUDNN_VERSION").or_else(|_| env::var("ORT_CUDNN_VERSION")).as_deref() {
+					Ok(v) => {
+						if v.starts_with("8") {
+							"cu12+cudnn8"
+						} else {
+							"cu12"
+						}
+					}
+					Err(_) => "cu12"
+				};
+
+				match env::var("ORT_DFBIN_FORCE_CUDA_VERSION").as_deref() {
+					Ok("11") => feature_set.push("cu11"),
+					Ok("12") => feature_set.push("cu12"),
+					_ => {
+						let mut success = false;
+						if let Ok(nvcc_output) = Command::new("nvcc").arg("--version").output() {
+							if nvcc_output.status.success() {
+								let stdout = String::from_utf8_lossy(&nvcc_output.stdout);
+								let version_line = stdout.lines().nth(3).unwrap();
+								let release_section = version_line.split(", ").nth(1).unwrap();
+								let version_number = release_section.split(' ').nth(1).unwrap();
+								if version_number.starts_with("12") {
+									feature_set.push(cu12_tag);
+								} else {
+									feature_set.push("cu11");
+								}
+								success = true;
+							}
+						}
+
+						if !success {
+							println!("cargo:warning=nvcc call did not succeed. falling back to CUDA 12");
+							// fallback to CUDA 12.
+							feature_set.push(cu12_tag);
+						}
+					}
+				}
 			} else if cfg!(feature = "rocm") {
-				"rocm"
-			} else {
-				"none"
-			};
-			let _ = designator; // 上記のものを無視する
-			let designator = if cfg!(feature = "directml") {
+				feature_set.push("rocm");
+			}
+			let feature_set = if !feature_set.is_empty() { feature_set.join(",") } else { "none".to_owned() };
+			let _ = feature_set; // 上記のものを無視する
+			let feature_set = if cfg!(feature = "directml") {
 				"directml"
 			} else if cfg!(feature = "cuda") {
-				"cu12" // ビルド環境に何がインストールされていようが、常にCUDA 12を使う
+				"cu12+cudnn8" // ビルド環境に何がインストールされていようが、常にCUDA 12とcuDNN 8を使う
 			} else {
 				"none"
-			};
-			let mut dist = find_dist(&target, designator);
-			if dist.is_none() && designator != "none" {
+			}
+			.to_owned();
+			println!("selected feature set: {feature_set}");
+			let mut dist = find_dist(&target, &feature_set);
+			if dist.is_none() && feature_set != "none" {
 				dist = find_dist(&target, "none");
 			}
 
 			if dist.is_none() {
 				panic!(
 					"downloaded binaries not available for target {target}{}\nyou may have to compile ONNX Runtime from source",
-					if designator != "none" {
-						format!(" (note: also requested `{designator}`)")
+					if feature_set != "none" {
+						format!(" (note: also requested features `{feature_set}`)")
 					} else {
 						String::new()
 					}
@@ -406,6 +455,36 @@ fn prepare_libort_dir() -> (PathBuf, bool) {
 	}
 }
 
+fn try_setup_with_pkg_config() -> bool {
+	match pkg_config::Config::new().probe("libonnxruntime") {
+		Ok(lib) => {
+			let expected_minor = ONNXRUNTIME_VERSION.split('.').nth(1).unwrap().parse::<usize>().unwrap();
+			let got_minor = lib.version.split('.').nth(1).unwrap().parse::<usize>().unwrap();
+			if got_minor < expected_minor {
+				println!("libonnxruntime provided by pkg-config is out of date, so it will be ignored - expected {}, got {}", ONNXRUNTIME_VERSION, lib.version);
+				return false;
+			}
+
+			// Setting the link paths
+			for path in lib.link_paths {
+				println!("cargo:rustc-link-search=native={}", path.display());
+			}
+
+			// Setting the libraries to link against
+			for lib in lib.libs {
+				println!("cargo:rustc-link-lib={}", lib);
+			}
+
+			println!("Using onnxruntime found by pkg-config.");
+			true
+		}
+		Err(_) => {
+			println!("onnxruntime not found using pkg-config, falling back to manual setup.");
+			false
+		}
+	}
+}
+
 fn real_main(link: bool) {
 	println!("cargo:rerun-if-env-changed={}", ORT_ENV_SYSTEM_LIB_LOCATION);
 	println!("cargo:rerun-if-env-changed={}", ORT_ENV_SYSTEM_LIB_PROFILE);
@@ -416,7 +495,15 @@ fn real_main(link: bool) {
 
 	if link {
 		if needs_link {
-			println!("cargo:rustc-link-lib=onnxruntime");
+			let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap();
+			let static_lib_file_name = if target_os.contains("windows") { "onnxruntime.lib" } else { "libonnxruntime.a" };
+
+			let static_lib_path = lib_dir.join(static_lib_file_name);
+			if static_lib_path.exists() {
+				println!("cargo:rustc-link-lib=static=onnxruntime");
+			} else {
+				println!("cargo:rustc-link-lib=onnxruntime");
+			}
 			println!("cargo:rustc-link-search=native={}", lib_dir.display());
 		}
 
@@ -436,14 +523,20 @@ fn main() {
 	}
 
 	if cfg!(feature = "load-dynamic") {
-		// we only need to execute the real main step if we are using the download strategy...
-		if cfg!(feature = "download-binaries") && env::var(ORT_ENV_SYSTEM_LIB_LOCATION).is_err() {
-			// but we don't need to link to the binaries we download (so all we are doing is downloading them and placing them in
-			// the output directory)
-			real_main(false);
+		if !try_setup_with_pkg_config() {
+			// Only execute the real main step if pkg-config fails and if we are using the download
+			// strategy
+			if cfg!(feature = "download-binaries") && env::var(ORT_ENV_SYSTEM_LIB_LOCATION).is_err() {
+				// but we don't need to link to the binaries we download (so all we are doing is
+				// downloading them and placing them in the output directory)
+				real_main(false); // but we don't need to link to the binaries we download
+			}
 		}
 	} else {
-		// if we are not using the load-dynamic feature then we need to link to dylibs.
-		real_main(true);
+		// If pkg-config setup was successful, we don't need further action
+		// Otherwise, if we are not using the load-dynamic feature, we need to link to the dylibs.
+		if !try_setup_with_pkg_config() {
+			real_main(true);
+		}
 	}
 }

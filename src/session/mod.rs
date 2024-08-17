@@ -2,7 +2,7 @@
 
 use std::{any::Any, ffi::CString, marker::PhantomData, ops::Deref, os::raw::c_char, ptr::NonNull, sync::Arc};
 
-use super::{
+use crate::{
 	char_p_to_string,
 	environment::Environment,
 	error::{assert_non_null_pointer, assert_null_pointer, status_to_result, Error, ErrorInternal, Result},
@@ -18,12 +18,14 @@ mod r#async;
 pub(crate) mod builder;
 pub(crate) mod input;
 pub(crate) mod output;
-use self::r#async::{AsyncInferenceContext, InferenceFutInner};
+mod run_options;
+use self::r#async::{AsyncInferenceContext, InferenceFutInner, RunOptionsRef};
 pub use self::{
 	r#async::InferenceFut,
 	builder::{GraphOptimizationLevel, SessionBuilder},
 	input::{SessionInputValue, SessionInputs},
-	output::SessionOutputs
+	output::SessionOutputs,
+	run_options::{HasSelectedOutputs, NoSelectedOutputs, OutputSelector, RunOptions, SelectedOutputMarker}
 };
 
 /// Holds onto an [`ort_sys::OrtSession`] pointer and its associated allocator.
@@ -112,101 +114,6 @@ pub struct Output {
 	pub output_type: ValueType
 }
 
-/// A structure which can be passed to [`Session::run_with_options`] to allow terminating/unterminating a session
-/// inference run from a different thread.
-#[derive(Debug)]
-pub struct RunOptions {
-	pub(crate) run_options_ptr: NonNull<ort_sys::OrtRunOptions>
-}
-
-// https://onnxruntime.ai/docs/api/c/struct_ort_api.html#ac2a08cac0a657604bd5899e0d1a13675
-unsafe impl Send for RunOptions {}
-unsafe impl Sync for RunOptions {}
-
-impl RunOptions {
-	/// Creates a new [`RunOptions`] struct.
-	pub fn new() -> Result<Self> {
-		let mut run_options_ptr: *mut ort_sys::OrtRunOptions = std::ptr::null_mut();
-		ortsys![unsafe CreateRunOptions(&mut run_options_ptr) -> Error::CreateRunOptions; nonNull(run_options_ptr)];
-		Ok(Self {
-			run_options_ptr: unsafe { NonNull::new_unchecked(run_options_ptr) }
-		})
-	}
-
-	/// Sets a tag to identify this run in logs.
-	pub fn set_tag(&mut self, tag: impl AsRef<str>) -> Result<()> {
-		let tag = CString::new(tag.as_ref())?;
-		ortsys![unsafe RunOptionsSetRunTag(self.run_options_ptr.as_ptr(), tag.as_ptr()) -> Error::RunOptionsSetTag];
-		Ok(())
-	}
-
-	/// Sets the termination flag for the runs associated with this [`RunOptions`].
-	///
-	/// This function returns immediately (it does not wait for the session run to terminate). The run will terminate as
-	/// soon as it is able to.
-	///
-	/// ```no_run
-	/// # // no_run because upsample.onnx is too simple of a model for the termination signal to be reliable enough
-	/// # use std::sync::Arc;
-	/// # use ort::{Session, RunOptions, Value, ValueType, TensorElementType};
-	/// # fn main() -> ort::Result<()> {
-	/// # 	let session = Session::builder()?.commit_from_file("tests/data/upsample.onnx")?;
-	/// # 	let input = Value::from_array(ndarray::Array4::<f32>::zeros((1, 64, 64, 3)))?;
-	/// let run_options = Arc::new(RunOptions::new()?);
-	///
-	/// let run_options_ = Arc::clone(&run_options);
-	/// std::thread::spawn(move || {
-	/// 	let _ = run_options_.terminate();
-	/// });
-	///
-	/// let res = session.run_with_options(ort::inputs![input]?, run_options);
-	/// // upon termination, the session will return an `Error::SessionRun` error.`
-	/// assert_eq!(
-	/// 	&res.unwrap_err().to_string(),
-	/// 	"Failed to run inference on model: Exiting due to terminate flag being set to true."
-	/// );
-	/// # 	Ok(())
-	/// # }
-	/// ```
-	pub fn terminate(&self) -> Result<()> {
-		ortsys![unsafe RunOptionsSetTerminate(self.run_options_ptr.as_ptr()) -> Error::RunOptionsSetTerminate];
-		Ok(())
-	}
-
-	/// Resets the termination flag for the runs associated with [`RunOptions`].
-	///
-	/// ```no_run
-	/// # use std::sync::Arc;
-	/// # use ort::{Session, RunOptions, Value, ValueType, TensorElementType};
-	/// # fn main() -> ort::Result<()> {
-	/// # 	let session = Session::builder()?.commit_from_file("tests/data/upsample.onnx")?;
-	/// # 	let input = Value::from_array(ndarray::Array4::<f32>::zeros((1, 64, 64, 3)))?;
-	/// let run_options = Arc::new(RunOptions::new()?);
-	///
-	/// let run_options_ = Arc::clone(&run_options);
-	/// std::thread::spawn(move || {
-	/// 	let _ = run_options_.terminate();
-	/// 	// ...oops, didn't mean to do that
-	/// 	let _ = run_options_.unterminate();
-	/// });
-	///
-	/// let res = session.run_with_options(ort::inputs![input]?, run_options);
-	/// assert!(res.is_ok());
-	/// # 	Ok(())
-	/// # }
-	/// ```
-	pub fn unterminate(&self) -> Result<()> {
-		ortsys![unsafe RunOptionsUnsetTerminate(self.run_options_ptr.as_ptr()) -> Error::RunOptionsUnsetTerminate];
-		Ok(())
-	}
-}
-
-impl Drop for RunOptions {
-	fn drop(&mut self) {
-		ortsys![unsafe ReleaseRunOptions(self.run_options_ptr.as_ptr())];
-	}
-}
-
 impl Session {
 	/// Creates a new [`SessionBuilder`].
 	pub fn builder() -> Result<SessionBuilder> {
@@ -252,17 +159,19 @@ impl Session {
 	/// # 	Ok(())
 	/// # }
 	/// ```
-	pub fn run<'s, 'i, 'v: 'i, const N: usize>(&'s self, input_values: impl Into<SessionInputs<'i, 'v, N>>) -> Result<SessionOutputs<'s>> {
+	pub fn run<'s, 'i, 'v: 'i, const N: usize>(&'s self, input_values: impl Into<SessionInputs<'i, 'v, N>>) -> Result<SessionOutputs<'_, 's>> {
 		match input_values.into() {
 			SessionInputs::ValueSlice(input_values) => {
-				self.run_inner(&self.inputs.iter().map(|input| input.name.as_str()).collect::<Vec<_>>(), input_values.iter(), None)
+				self.run_inner::<NoSelectedOutputs>(&self.inputs.iter().map(|input| input.name.as_str()).collect::<Vec<_>>(), input_values.iter(), None)
 			}
 			SessionInputs::ValueArray(input_values) => {
-				self.run_inner(&self.inputs.iter().map(|input| input.name.as_str()).collect::<Vec<_>>(), input_values.iter(), None)
+				self.run_inner::<NoSelectedOutputs>(&self.inputs.iter().map(|input| input.name.as_str()).collect::<Vec<_>>(), input_values.iter(), None)
 			}
-			SessionInputs::ValueMap(input_values) => {
-				self.run_inner(&input_values.iter().map(|(k, _)| k.as_ref()).collect::<Vec<_>>(), input_values.iter().map(|(_, v)| v), None)
-			}
+			SessionInputs::ValueMap(input_values) => self.run_inner::<NoSelectedOutputs>(
+				&input_values.iter().map(|(k, _)| k.as_ref()).collect::<Vec<_>>(),
+				input_values.iter().map(|(_, v)| v),
+				None
+			)
 		}
 	}
 
@@ -283,7 +192,7 @@ impl Session {
 	/// 	let _ = run_options_.terminate();
 	/// });
 	///
-	/// let res = session.run_with_options(ort::inputs![input]?, run_options);
+	/// let res = session.run_with_options(ort::inputs![input]?, &*run_options);
 	/// // upon termination, the session will return an `Error::SessionRun` error.`
 	/// assert_eq!(
 	/// 	&res.unwrap_err().to_string(),
@@ -292,11 +201,11 @@ impl Session {
 	/// # 	Ok(())
 	/// # }
 	/// ```
-	pub fn run_with_options<'s, 'i, 'v: 'i, const N: usize>(
+	pub fn run_with_options<'r, 's: 'r, 'i, 'v: 'i, O: SelectedOutputMarker, const N: usize>(
 		&'s self,
 		input_values: impl Into<SessionInputs<'i, 'v, N>>,
-		run_options: Arc<RunOptions>
-	) -> Result<SessionOutputs<'s>> {
+		run_options: &'r RunOptions<O>
+	) -> Result<SessionOutputs<'r, 's>> {
 		match input_values.into() {
 			SessionInputs::ValueSlice(input_values) => {
 				self.run_inner(&self.inputs.iter().map(|input| input.name.as_str()).collect::<Vec<_>>(), input_values.iter(), Some(run_options))
@@ -310,25 +219,34 @@ impl Session {
 		}
 	}
 
-	fn run_inner<'i, 'v: 'i>(
-		&self,
+	fn run_inner<'i, 'r, 's: 'r, 'v: 'i, O: SelectedOutputMarker>(
+		&'s self,
 		input_names: &[&str],
 		input_values: impl Iterator<Item = &'i SessionInputValue<'v>>,
-		run_options: Option<Arc<RunOptions>>
-	) -> Result<SessionOutputs<'_>> {
+		run_options: Option<&'r RunOptions<O>>
+	) -> Result<SessionOutputs<'r, 's>> {
 		let input_names_ptr: Vec<*const c_char> = input_names
 			.iter()
 			.map(|n| CString::new(n.as_bytes()).unwrap_or_else(|_| unreachable!()))
 			.map(|n| n.into_raw().cast_const())
 			.collect();
-		let output_names_ptr: Vec<*const c_char> = self
-			.outputs
+
+		let (output_names, output_tensors) = match run_options {
+			Some(r) => r.outputs.resolve_outputs(&self.outputs),
+			None => (self.outputs.iter().map(|o| o.name.as_str()).collect(), std::iter::repeat_with(|| None).take(self.outputs.len()).collect())
+		};
+		let output_names_ptr: Vec<*const c_char> = output_names
 			.iter()
-			.map(|output| CString::new(output.name.as_str()).unwrap_or_else(|_| unreachable!()))
+			.map(|n| CString::new(*n).unwrap_or_else(|_| unreachable!()))
 			.map(|n| n.into_raw().cast_const())
 			.collect();
-
-		let mut output_tensor_ptrs: Vec<*mut ort_sys::OrtValue> = vec![std::ptr::null_mut(); self.outputs.len()];
+		let mut output_tensor_ptrs: Vec<*mut ort_sys::OrtValue> = output_tensors
+			.iter()
+			.map(|c| match c {
+				Some(v) => v.ptr(),
+				None => std::ptr::null_mut()
+			})
+			.collect();
 
 		// The C API expects pointers for the arrays (pointers to C-arrays)
 		let input_ort_values: Vec<*const ort_sys::OrtValue> = input_values.map(|input_array_ort| input_array_ort.ptr().cast_const()).collect();
@@ -352,10 +270,17 @@ impl Session {
 			) -> Error::SessionRun
 		];
 
-		let outputs: Vec<Value> = output_tensor_ptrs
+		let outputs: Vec<Value> = output_tensors
 			.into_iter()
-			.map(|tensor_ptr| unsafe {
-				Value::from_ptr(NonNull::new(tensor_ptr).expect("OrtValue ptr returned from session Run should not be null"), Some(Arc::clone(&self.inner)))
+			.enumerate()
+			.map(|(i, v)| match v {
+				Some(value) => value,
+				None => unsafe {
+					Value::from_ptr(
+						NonNull::new(output_tensor_ptrs[i]).expect("OrtValue ptr returned from session Run should not be null"),
+						Some(Arc::clone(&self.inner))
+					)
+				}
 			})
 			.collect();
 
@@ -371,7 +296,7 @@ impl Session {
 				.collect::<Result<Vec<_>>>()?
 		);
 
-		Ok(SessionOutputs::new(self.outputs.iter().map(|o| o.name.as_str()), outputs))
+		Ok(SessionOutputs::new(output_names.into_iter(), outputs))
 	}
 
 	/// Asynchronously run input data through the ONNX graph, performing inference.
@@ -393,22 +318,56 @@ impl Session {
 	/// # 	Ok(())
 	/// # }) }
 	/// ```
-	pub fn run_async<'s, 'i, 'v: 'i + 's, const N: usize>(&'s self, input_values: impl Into<SessionInputs<'i, 'v, N>> + 'static) -> Result<InferenceFut<'s>> {
+	pub fn run_async<'s, 'i, 'v: 'i + 's, const N: usize>(
+		&'s self,
+		input_values: impl Into<SessionInputs<'i, 'v, N>> + 'static
+	) -> Result<InferenceFut<'s, '_, NoSelectedOutputs>> {
 		match input_values.into() {
 			SessionInputs::ValueSlice(_) => unimplemented!("slices cannot be used in `run_async`"),
 			SessionInputs::ValueArray(input_values) => {
-				self.run_inner_async(&self.inputs.iter().map(|input| input.name.to_string()).collect::<Vec<_>>(), input_values.into_iter())
+				self.run_inner_async(&self.inputs.iter().map(|input| input.name.to_string()).collect::<Vec<_>>(), input_values.into_iter(), None)
 			}
 			SessionInputs::ValueMap(input_values) => {
-				self.run_inner_async(&input_values.iter().map(|(k, _)| k.to_string()).collect::<Vec<_>>(), input_values.into_iter().map(|(_, v)| v))
+				self.run_inner_async(&input_values.iter().map(|(k, _)| k.to_string()).collect::<Vec<_>>(), input_values.into_iter().map(|(_, v)| v), None)
 			}
 		}
 	}
 
-	fn run_inner_async<'s, 'v: 's>(&'s self, input_names: &[String], input_values: impl Iterator<Item = SessionInputValue<'v>>) -> Result<InferenceFut<'s>> {
-		// create a `RunOptions` to pass to the future so that when it drops, it terminates inference - crucial
-		// (performance-wise) for routines involving `tokio::select!` or timeouts
-		let run_options = Arc::new(RunOptions::new()?);
+	/// Asynchronously run input data through the ONNX graph, performing inference, with the given [`RunOptions`].
+	/// See [`Session::run_with_options`] and [`Session::run_async`] for more details.
+	pub fn run_async_with_options<'s, 'i, 'v: 'i + 's, 'r, O: SelectedOutputMarker, const N: usize>(
+		&'s self,
+		input_values: impl Into<SessionInputs<'i, 'v, N>> + 'static,
+		run_options: &'r RunOptions<O>
+	) -> Result<InferenceFut<'s, 'r, O>> {
+		match input_values.into() {
+			SessionInputs::ValueSlice(_) => unimplemented!("slices cannot be used in `run_async`"),
+			SessionInputs::ValueArray(input_values) => {
+				self.run_inner_async(&self.inputs.iter().map(|input| input.name.to_string()).collect::<Vec<_>>(), input_values.into_iter(), Some(run_options))
+			}
+			SessionInputs::ValueMap(input_values) => self.run_inner_async(
+				&input_values.iter().map(|(k, _)| k.to_string()).collect::<Vec<_>>(),
+				input_values.into_iter().map(|(_, v)| v),
+				Some(run_options)
+			)
+		}
+	}
+
+	fn run_inner_async<'s, 'v: 's, 'r, O: SelectedOutputMarker>(
+		&'s self,
+		input_names: &[String],
+		input_values: impl Iterator<Item = SessionInputValue<'v>>,
+		run_options: Option<&'r RunOptions<O>>
+	) -> Result<InferenceFut<'s, 'r, O>> {
+		let run_options = match run_options {
+			Some(r) => RunOptionsRef::Ref(r),
+			// create a `RunOptions` to pass to the future so that when it drops, it terminates inference - crucial
+			// (performance-wise) for routines involving `tokio::select!` or timeouts
+			None => RunOptionsRef::Arc(Arc::new(unsafe {
+				// SAFETY: transmuting from `RunOptions<NoSelectedOutputs>` to `RunOptions<O>`; safe because its just a marker
+				std::mem::transmute(RunOptions::new()?)
+			}))
+		};
 
 		let input_name_ptrs: Vec<*const c_char> = input_names
 			.iter()
@@ -489,7 +448,6 @@ unsafe impl Sync for Session {}
 
 mod dangerous {
 	use super::*;
-	use crate::value::{extract_data_type_from_map_info, extract_data_type_from_sequence_info, extract_data_type_from_tensor_info};
 
 	pub(super) fn extract_inputs_count(session_ptr: NonNull<ort_sys::OrtSession>) -> Result<usize> {
 		let f = ortsys![unsafe SessionGetInputCount];
@@ -586,29 +544,6 @@ mod dangerous {
 		status_to_result(status).map_err(Error::GetTypeInfo)?;
 		assert_non_null_pointer(typeinfo_ptr, "TypeInfo")?;
 
-		let mut ty: ort_sys::ONNXType = ort_sys::ONNXType::ONNX_TYPE_UNKNOWN;
-		let status = ortsys![unsafe GetOnnxTypeFromTypeInfo(typeinfo_ptr, &mut ty)];
-		status_to_result(status).map_err(Error::GetOnnxTypeFromTypeInfo)?;
-		let io_type = match ty {
-			ort_sys::ONNXType::ONNX_TYPE_TENSOR | ort_sys::ONNXType::ONNX_TYPE_SPARSETENSOR => {
-				let mut info_ptr: *const ort_sys::OrtTensorTypeAndShapeInfo = std::ptr::null_mut();
-				ortsys![unsafe CastTypeInfoToTensorInfo(typeinfo_ptr, &mut info_ptr) -> Error::CastTypeInfoToTensorInfo; nonNull(info_ptr)];
-				unsafe { extract_data_type_from_tensor_info(info_ptr)? }
-			}
-			ort_sys::ONNXType::ONNX_TYPE_SEQUENCE => {
-				let mut info_ptr: *const ort_sys::OrtSequenceTypeInfo = std::ptr::null_mut();
-				ortsys![unsafe CastTypeInfoToSequenceTypeInfo(typeinfo_ptr, &mut info_ptr) -> Error::CastTypeInfoToSequenceTypeInfo; nonNull(info_ptr)];
-				unsafe { extract_data_type_from_sequence_info(info_ptr)? }
-			}
-			ort_sys::ONNXType::ONNX_TYPE_MAP => {
-				let mut info_ptr: *const ort_sys::OrtMapTypeInfo = std::ptr::null_mut();
-				ortsys![unsafe CastTypeInfoToMapTypeInfo(typeinfo_ptr, &mut info_ptr) -> Error::CastTypeInfoToMapTypeInfo; nonNull(info_ptr)];
-				unsafe { extract_data_type_from_map_info(info_ptr)? }
-			}
-			_ => unreachable!()
-		};
-
-		ortsys![unsafe ReleaseTypeInfo(typeinfo_ptr)];
-		Ok(io_type)
+		ValueType::from_type_info(typeinfo_ptr)
 	}
 }

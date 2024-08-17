@@ -1,5 +1,8 @@
-use super::ExecutionProvider;
-use crate::{Error, ExecutionProviderDispatch, Result, SessionBuilder};
+use crate::{
+	error::{Error, Result},
+	execution_providers::{ExecutionProvider, ExecutionProviderDispatch},
+	session::SessionBuilder
+};
 
 #[cfg(all(not(feature = "load-dynamic"), feature = "nnapi"))]
 extern "C" {
@@ -59,7 +62,7 @@ impl NNAPIExecutionProvider {
 
 impl From<NNAPIExecutionProvider> for ExecutionProviderDispatch {
 	fn from(value: NNAPIExecutionProvider) -> Self {
-		ExecutionProviderDispatch::NNAPI(value)
+		ExecutionProviderDispatch::new(value)
 	}
 }
 

@@ -1,5 +1,8 @@
-use super::ExecutionProvider;
-use crate::{ArenaExtendStrategy, Error, ExecutionProviderDispatch, Result, SessionBuilder};
+use crate::{
+	error::{Error, Result},
+	execution_providers::{ArenaExtendStrategy, ExecutionProvider, ExecutionProviderDispatch},
+	session::SessionBuilder
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -109,7 +112,7 @@ impl CANNExecutionProvider {
 
 impl From<CANNExecutionProvider> for ExecutionProviderDispatch {
 	fn from(value: CANNExecutionProvider) -> Self {
-		ExecutionProviderDispatch::CANN(value)
+		ExecutionProviderDispatch::new(value)
 	}
 }
 

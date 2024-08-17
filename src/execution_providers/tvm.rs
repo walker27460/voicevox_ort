@@ -1,9 +1,12 @@
-use super::ExecutionProvider;
-use crate::{Error, ExecutionProviderDispatch, Result, SessionBuilder};
+use crate::{
+	error::{Error, Result},
+	execution_providers::{ExecutionProvider, ExecutionProviderDispatch},
+	session::SessionBuilder
+};
 
 #[cfg(all(not(feature = "load-dynamic"), feature = "tvm"))]
 extern "C" {
-	fn OrtSessionOptionsAppendExecutionProvider_Tvm(options: *mut ort_sys::OrtSessionOptions, use_arena: std::os::raw::c_int) -> ort_sys::OrtStatusPtr;
+	fn OrtSessionOptionsAppendExecutionProvider_Tvm(options: *mut ort_sys::OrtSessionOptions, opt_str: *const std::os::raw::c_char) -> ort_sys::OrtStatusPtr;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,7 +57,7 @@ impl TVMExecutionProvider {
 
 impl From<TVMExecutionProvider> for ExecutionProviderDispatch {
 	fn from(value: TVMExecutionProvider) -> Self {
-		ExecutionProviderDispatch::TVM(value)
+		ExecutionProviderDispatch::new(value)
 	}
 }
 

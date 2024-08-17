@@ -1,5 +1,8 @@
-use super::ExecutionProvider;
-use crate::{Error, ExecutionProviderDispatch, Result, SessionBuilder};
+use crate::{
+	error::{Error, Result},
+	execution_providers::{ExecutionProvider, ExecutionProviderDispatch},
+	session::SessionBuilder
+};
 
 #[cfg(all(not(feature = "load-dynamic"), feature = "coreml"))]
 extern "C" {
@@ -46,7 +49,7 @@ impl CoreMLExecutionProvider {
 
 impl From<CoreMLExecutionProvider> for ExecutionProviderDispatch {
 	fn from(value: CoreMLExecutionProvider) -> Self {
-		ExecutionProviderDispatch::CoreML(value)
+		ExecutionProviderDispatch::new(value)
 	}
 }
 

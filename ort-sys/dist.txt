@@ -12,9 +12,9 @@ none	i686-pc-windows-msvc	https://github.com/VOICEVOX/onnxruntime-builder/releas
 
 directml	x86_64-pc-windows-msvc	https://github.com/VOICEVOX/onnxruntime-builder/releases/download/1.17.3/onnxruntime-win-x64-gpu-1.17.3.tgz	85345B4D7371C9A07C38ABDE853694FB0311EA2E41953DF3CCB052C564BAC8C2
 #cu11	x86_64-pc-windows-msvc	https://parcel.pyke.io/v2/delivery/ortrs/packages/msort-binary/1.17.3/ortrs-msort_dylib_cuda11-v1.17.3-x86_64-pc-windows-msvc.tgz	9AE21DECB9BE1270CD850276AAC1AB9C2E2AE978B563B733804F5DF7DACC3BE5
-cu12	x86_64-pc-windows-msvc	https://github.com/VOICEVOX/onnxruntime-builder/releases/download/1.17.3/onnxruntime-win-x64-gpu-1.17.3.tgz	85345B4D7371C9A07C38ABDE853694FB0311EA2E41953DF3CCB052C564BAC8C2
+cu12+cudnn8	x86_64-pc-windows-msvc	https://github.com/VOICEVOX/onnxruntime-builder/releases/download/1.17.3/onnxruntime-win-x64-gpu-1.17.3.tgz	85345B4D7371C9A07C38ABDE853694FB0311EA2E41953DF3CCB052C564BAC8C2
 #cu11	x86_64-unknown-linux-gnu	https://parcel.pyke.io/v2/delivery/ortrs/packages/msort-binary/1.17.3/ortrs-msort_dylib_cuda11-v1.17.3-x86_64-unknown-linux-gnu.tgz	D4C264EA6805790D4C8B51D166EF6BD407FB3ECC641B33AEFE77FCD5BF0C6ECA
-cu12	x86_64-unknown-linux-gnu	https://github.com/VOICEVOX/onnxruntime-builder/releases/download/1.17.3/onnxruntime-linux-x64-gpu-1.17.3.tgz	6212F2BD130BAD7F59027DB24DC4DD8510E01FAFE875E04E7863A99B9D8BE400
+cu12+cudnn8	x86_64-unknown-linux-gnu	https://github.com/VOICEVOX/onnxruntime-builder/releases/download/1.17.3/onnxruntime-linux-x64-gpu-1.17.3.tgz	6212F2BD130BAD7F59027DB24DC4DD8510E01FAFE875E04E7863A99B9D8BE400
 #rocm	x86_64-unknown-linux-gnu	https://parcel.pyke.io/v2/delivery/ortrs/packages/msort-binary/1.17.3/ortrs-msort_dylib_rocm-v1.17.3-x86_64-unknown-linux-gnu.tgz	50E39B38484A0676B3D24365149CE9E7760F658B552EFE5A9382AB503D73D7E7
 
 # todo: update WASM build to 1.17.3

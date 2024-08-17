@@ -1,7 +1,10 @@
 use std::os::raw::c_void;
 
-use super::ExecutionProvider;
-use crate::{Error, ExecutionProviderDispatch, Result, SessionBuilder};
+use crate::{
+	error::{Error, Result},
+	execution_providers::{ExecutionProvider, ExecutionProviderDispatch},
+	session::SessionBuilder
+};
 
 #[derive(Debug, Clone)]
 pub struct OpenVINOExecutionProvider {
@@ -103,7 +106,7 @@ impl OpenVINOExecutionProvider {
 
 impl From<OpenVINOExecutionProvider> for ExecutionProviderDispatch {
 	fn from(value: OpenVINOExecutionProvider) -> Self {
-		ExecutionProviderDispatch::OpenVINO(value)
+		ExecutionProviderDispatch::new(value)
 	}
 }
 
