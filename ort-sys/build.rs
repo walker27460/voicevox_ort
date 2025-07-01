@@ -147,7 +147,7 @@ fn static_link_prerequisites(using_pyke_libs: bool) {
 	if target_os == "macos" || target_os == "ios" {
 		println!("cargo:rustc-link-lib=c++");
 		println!("cargo:rustc-link-lib=framework=Foundation");
-	} else if target_os == "linux" || target_os == "android" {
+	} else if target_os == "linux" {
 		println!("cargo:rustc-link-lib=stdc++");
 	} else if target_os == "windows" && (using_pyke_libs || cfg!(feature = "directml")) {
 		println!("cargo:rustc-link-lib=dxguid");
